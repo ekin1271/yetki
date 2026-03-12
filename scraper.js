@@ -285,14 +285,14 @@ async function main() {
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
       const batch = urls.slice(i, i + CONCURRENCY);
       const results = await Promise.all(
-        batch.map(({ url, checkIn }) => scrapePageOnce(browser, url, checkIn).then(results => ({ results, usedCheckIn: checkIn })))
+        batch.map(({ url, checkIn }) => scrapePageOnce(browser, url, checkIn).then(results => ({ results, url, usedCheckIn: checkIn })))
       );
-      for (const { results: offers, usedCheckIn } of results) {
+      for (const { results: offers, url: batchUrl, usedCheckIn } of results) {
         if (offers.length > 0) {
           if (!offersByDate[usedCheckIn]) offersByDate[usedCheckIn] = [];
           offersByDate[usedCheckIn].push(...offers);
         } else {
-          emptyUrls.push({ url, checkIn: usedCheckIn });
+          emptyUrls.push({ url: batchUrl, checkIn: usedCheckIn });
         }
       }
       completed += batch.length;
