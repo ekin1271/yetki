@@ -3,10 +3,9 @@ const fs = require('fs');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const STATE_FILE = 'tekel_state.json';       // FARK 1
+const STATE_FILE = 'tekel_state.json';
 const HOTELS_FILE = 'hotels.json';
 
-// FARK 2: Sadece Peninsula ve AKAY
 const AGENCY_RULES = [
   { pattern: '103810219', name: 'PENINSULA' },
   { pattern: '103816', name: 'AKAY' },
@@ -31,7 +30,6 @@ function generateDates() {
     firstDate.setDate(15);
   }
 
-  // FARK 3: 3 ay
   for (let m = 0; m < 3; m++) {
     const d = m === 0
       ? new Date(firstDate)
@@ -77,7 +75,6 @@ async function sendTelegram(text) {
   else console.log('Telegram bildirimi gonderildi.');
 }
 
-// FARK 4: Tekel raporu formatı
 async function sendTelegramSplit(newAlerts, closedAlerts) {
   const time = `\n🕐 ${new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' })}`;
   const allAlerts = [
@@ -134,8 +131,6 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
   }
   await sendTelegram(current + time);
 }
-
-// === AŞAĞISI FİYAT ANALİZİ İLE BİREBİR AYNI ===
 
 async function scrapePageOnce(browser, targetUrl, checkIn) {
   const page = await browser.newPage();
@@ -206,8 +201,6 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
   return results;
 }
 
-
-// FARK 4: present/absent mantığı
 function analyzeOffers(checkIn, offers, prevState, newState) {
   const newAlerts = [];
   const closedAlerts = [];
@@ -287,12 +280,12 @@ async function main() {
       const results = await Promise.all(
         batch.map(({ url, checkIn }) => scrapePageOnce(browser, url, checkIn).then(results => ({ results, url, usedCheckIn: checkIn })))
       );
-      for (const { results: offers, url: batchUrl, usedCheckIn } of results) {
+      for (const { results: offers, url, usedCheckIn } of results) {
         if (offers.length > 0) {
           if (!offersByDate[usedCheckIn]) offersByDate[usedCheckIn] = [];
           offersByDate[usedCheckIn].push(...offers);
         } else {
-          emptyUrls.push({ url: batchUrl, checkIn: usedCheckIn });
+          emptyUrls.push({ url, checkIn: usedCheckIn });
         }
       }
       completed += batch.length;
