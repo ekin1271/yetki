@@ -206,28 +206,6 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
   return results;
 }
 
-async function scrapePageWithDateShift(browser, targetUrl, checkIn) {
-  let results = await scrapePageOnce(browser, targetUrl, checkIn);
-  if (results.length > 0) return { results, usedUrl: targetUrl, usedCheckIn: checkIn };
-
-  const [d, m, y] = checkIn.split('.');
-  const date = new Date(y, m - 1, d);
-  date.setDate(date.getDate() + 5);
-  const nd = String(date.getDate()).padStart(2, '0');
-  const nm = String(date.getMonth() + 1).padStart(2, '0');
-  const ny = date.getFullYear();
-  const newCheckIn = `${nd}.${nm}.${ny}`;
-  const outDate = new Date(date);
-  outDate.setDate(outDate.getDate() + 7);
-  const od = String(outDate.getDate()).padStart(2, '0');
-  const om = String(outDate.getMonth() + 1).padStart(2, '0');
-  const oy = outDate.getFullYear();
-  const newCheckOut = `${od}.${om}.${oy}`;
-  const newUrl = targetUrl.replace(/data=\d{2}\.\d{2}\.\d{4}/, `data=${newCheckIn}`).replace(/d2=\d{2}\.\d{2}\.\d{4}/, `d2=${newCheckOut}`);
-
-  results = await scrapePageOnce(browser, newUrl, newCheckIn);
-  return { results, usedUrl: newUrl, usedCheckIn: newCheckIn, shifted: true, originalCheckIn: checkIn };
-}
 
 // FARK 4: present/absent mantığı
 function analyzeOffers(checkIn, offers, prevState, newState) {
@@ -307,14 +285,14 @@ async function main() {
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
       const batch = urls.slice(i, i + CONCURRENCY);
       const results = await Promise.all(
-        batch.map(({ url, checkIn }) => scrapePageWithDateShift(browser, url, checkIn))
+        batch.map(({ url, checkIn }) => scrapePageOnce(browser, url, checkIn).then(results => ({ results, usedCheckIn: checkIn })))
       );
-      for (const { results: offers, usedUrl, usedCheckIn, shifted, originalCheckIn } of results) {
+      for (const { results: offers, usedCheckIn } of results) {
         if (offers.length > 0) {
           if (!offersByDate[usedCheckIn]) offersByDate[usedCheckIn] = [];
           offersByDate[usedCheckIn].push(...offers);
         } else {
-          emptyUrls.push({ url: usedUrl, checkIn: usedCheckIn, originalCheckIn: shifted ? originalCheckIn : null });
+          emptyUrls.push({ url, checkIn: usedCheckIn });
         }
       }
       completed += batch.length;
@@ -323,9 +301,8 @@ async function main() {
 
     if (emptyUrls.length > 0) {
       console.log(`\n--- BOŞ GELEN URL'LER (${emptyUrls.length} adet) ---`);
-      for (const { url, checkIn, originalCheckIn } of emptyUrls) {
-        const dateInfo = originalCheckIn ? `${originalCheckIn} → ${checkIn} (kaydırıldı)` : checkIn;
-        console.log(`  [BOŞ] ${dateInfo} - ${url}`);
+      for (const { url, checkIn } of emptyUrls) {
+        console.log(`  [BOŞ] ${checkIn} - ${url}`);
       }
       console.log('---');
     }
