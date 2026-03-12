@@ -6,16 +6,16 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const STATE_FILE = 'tekel_state.json';
 const HOTELS_FILE = 'hotels.json';
 
-// Sadece bu ikisine bakıyoruz
+// FARK 1: Sadece Peninsula ve AKAY
 const AGENCY_RULES = [
   { pattern: '103810219', name: 'PENINSULA' },
   { pattern: '103816', name: 'AKAY' },
 ];
 
+// FARK 2: hotels.json {id, p} formatında
 function loadHotels() {
   if (fs.existsSync(HOTELS_FILE)) {
     return JSON.parse(fs.readFileSync(HOTELS_FILE, 'utf8'));
-    // Format: [{id: "...", p: "..."}]
   }
   return [];
 }
@@ -32,6 +32,7 @@ function generateDates() {
     firstDate.setDate(15);
   }
 
+  // FARK 3: 3 ay (fiyat analizinde 4)
   for (let m = 0; m < 3; m++) {
     const d = m === 0
       ? new Date(firstDate)
@@ -51,10 +52,6 @@ function generateDates() {
   return dates;
 }
 
-function buildUrl(hotelId, p, checkIn, checkOut) {
-  return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotelId}&ins=0-40000-EUR&flt=100411293179&p=${p}`;
-}
-
 function generateUrls() {
   const hotels = loadHotels();
   const dates = generateDates();
@@ -62,8 +59,9 @@ function generateUrls() {
 
   for (const { checkIn, checkOut } of dates) {
     for (const hotel of hotels) {
-      const url = buildUrl(hotel.id, hotel.p, checkIn, checkOut);
-      urls.push({ url, checkIn, checkOut, hotelId: hotel.id, p: hotel.p });
+      // FARK 4: p= her otel için hotels.json'dan geliyor
+      const url = `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
+      urls.push({ url, checkIn, hotelId: hotel.id });
     }
   }
   return urls;
@@ -80,6 +78,66 @@ async function sendTelegram(text) {
   if (!resp.ok) console.error('Telegram hatasi:', resp.status, await resp.text());
   else console.log('Telegram bildirimi gonderildi.');
 }
+
+// FARK 5: Tekel raporu formatı
+async function sendTelegramSplit(newAlerts, closedAlerts) {
+  const time = `\n🕐 ${new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' })}`;
+  const allAlerts = [
+    ...newAlerts.map(a => ({ ...a, type: 'new' })),
+    ...closedAlerts.map(a => ({ ...a, type: 'closed' })),
+  ];
+
+  if (allAlerts.length === 0) return;
+
+  const hotelGroups = {};
+  for (const a of allAlerts) {
+    const key = `${a.hotel}__${a.room}`;
+    if (!hotelGroups[key]) hotelGroups[key] = { hotel: a.hotel, room: a.room, entries: [] };
+    hotelGroups[key].entries.push(a);
+  }
+
+  for (const group of Object.values(hotelGroups)) {
+    group.entries.sort((a, b) => {
+      const toDate = s => { const [d,m,y] = s.split('.'); return new Date(y,m-1,d); };
+      return toDate(a.checkIn) - toDate(b.checkIn);
+    });
+  }
+
+  let current = '🔍 <b>Tekel İhlali Raporu</b>\n\n';
+  for (const group of Object.values(hotelGroups)) {
+    let block = `🏨 <b>${group.hotel}</b>\n🛏 ${group.room}\n`;
+    for (const a of group.entries) {
+      if (a.type === 'closed') {
+        block += `  📅 ${a.checkIn} ✅ AKAY kapandı\n`;
+      } else if (!a.peninsulaPrice) {
+        block += `  📅 ${a.checkIn} 🚨 AKAY girdi\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
+      } else if (a.akayPrice < a.peninsulaPrice) {
+        block += `  📅 ${a.checkIn} 🚨 AKAY öne geçti\n`;
+        block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB (Fark: ${(a.peninsulaPrice - a.akayPrice).toLocaleString('tr-TR')} RUB)\n`;
+      } else if (a.akayPrice === a.peninsulaPrice) {
+        block += `  📅 ${a.checkIn} 🟡 Fiyatlar eşit\n`;
+        block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+      } else {
+        block += `  📅 ${a.checkIn} 🆕 Rakip girdi (biz öndeyiz)\n`;
+        block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
+      }
+    }
+    block += `─────────────────\n`;
+
+    if ((current + block).length > 3500) {
+      await sendTelegram(current);
+      current = '🔍 <b>Tekel İhlali Raporu (devam)</b>\n\n' + block;
+    } else {
+      current += block;
+    }
+  }
+  await sendTelegram(current + time);
+}
+
+// === AŞAĞISI FİYAT ANALİZİ İLE BİREBİR AYNI ===
 
 async function scrapePageOnce(browser, targetUrl, checkIn) {
   const page = await browser.newPage();
@@ -107,7 +165,7 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
       for (const rule of agencyRules) {
         if (id.includes(rule.pattern)) return rule.name;
       }
-      return null;
+      return 'BILINMEYEN';
     }
 
     const offers = [];
@@ -133,8 +191,6 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
       if (!idMatch) continue;
 
       const agency = identifyAgency(idMatch[1]);
-      if (!agency) continue; // Peninsula ve AKAY dışını atla
-
       let priceRub = null;
       const priceEl = tr.querySelector('td.c_pe b');
       if (priceEl) priceRub = parseInt(priceEl.textContent.replace(/\D/g, ''), 10);
@@ -152,11 +208,10 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
   return results;
 }
 
-async function scrapePageWithDateShift(browser, targetUrl, checkIn, checkOut, p, hotelId) {
+async function scrapePageWithDateShift(browser, targetUrl, checkIn) {
   let results = await scrapePageOnce(browser, targetUrl, checkIn);
   if (results.length > 0) return { results, usedUrl: targetUrl, usedCheckIn: checkIn };
 
-  // Boş geldi — 5 gün sonrasını dene
   const [d, m, y] = checkIn.split('.');
   const date = new Date(y, m - 1, d);
   date.setDate(date.getDate() + 5);
@@ -170,54 +225,44 @@ async function scrapePageWithDateShift(browser, targetUrl, checkIn, checkOut, p,
   const om = String(outDate.getMonth() + 1).padStart(2, '0');
   const oy = outDate.getFullYear();
   const newCheckOut = `${od}.${om}.${oy}`;
-  const newUrl = buildUrl(hotelId, p, newCheckIn, newCheckOut);
+  const newUrl = targetUrl.replace(/data=\d{2}\.\d{2}\.\d{4}/, `data=${newCheckIn}`).replace(/d2=\d{2}\.\d{2}\.\d{4}/, `d2=${newCheckOut}`);
 
   results = await scrapePageOnce(browser, newUrl, newCheckIn);
   return { results, usedUrl: newUrl, usedCheckIn: newCheckIn, shifted: true, originalCheckIn: checkIn };
 }
 
 function analyzeOffers(checkIn, offers, prevState, newState) {
-  const newAlerts = [];   // AKAY yoktu → açtı
-  const closedAlerts = []; // AKAY vardı → kapattı
-
+  const newAlerts = [];
+  const closedAlerts = [];
   const groups = {};
+
   for (const offer of offers) {
     const key = `${checkIn}__${offer.hotelName}__${offer.roomType}`;
     if (!groups[key]) groups[key] = { hotelName: offer.hotelName, roomType: offer.roomType, peninsula: null, akay: null };
     if (offer.agency === 'PENINSULA') {
       if (!groups[key].peninsula || offer.priceRub < groups[key].peninsula)
         groups[key].peninsula = offer.priceRub;
-    }
-    if (offer.agency === 'AKAY') {
+    } else if (offer.agency === 'AKAY') {
       if (!groups[key].akay || offer.priceRub < groups[key].akay)
         groups[key].akay = offer.priceRub;
     }
   }
 
   for (const [key, data] of Object.entries(groups)) {
-    if (!data.peninsula) continue; // Biz yoksakbu satırı atla
+    if (!data.peninsula) continue;
 
     const prevStatus = prevState[key];
-    const hasAkay = data.akay !== null;
 
-    newState[key] = hasAkay ? 'present' : 'absent';
-
-    if (hasAkay && prevStatus !== 'present') {
-      // AKAY yeni açtı
-      newAlerts.push({
-        checkIn,
-        hotel: data.hotelName,
-        room: data.roomType,
-        peninsulaPrice: data.peninsula,
-        akayPrice: data.akay,
-      });
-    } else if (!hasAkay && prevStatus === 'present') {
-      // AKAY kapattı
-      closedAlerts.push({
-        checkIn,
-        hotel: data.hotelName,
-        room: data.roomType,
-      });
+    if (!data.akay) {
+      newState[key] = 'absent';
+      if (prevStatus === 'present') {
+        closedAlerts.push({ checkIn, hotel: data.hotelName, room: data.roomType });
+      }
+    } else {
+      newState[key] = 'present';
+      if (prevStatus !== 'present') {
+        newAlerts.push({ checkIn, hotel: data.hotelName, room: data.roomType, peninsulaPrice: data.peninsula, akayPrice: data.akay });
+      }
     }
   }
 
@@ -231,71 +276,6 @@ function loadState() {
 
 function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
-}
-
-async function sendReport(newAlerts, closedAlerts) {
-  const time = `\n🕐 ${new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' })}`;
-  if (newAlerts.length === 0 && closedAlerts.length === 0) return;
-
-  // Tüm alertleri tip ile birleştir
-  const allAlerts = [
-    ...newAlerts.map(a => ({ ...a, type: 'new' })),
-    ...closedAlerts.map(a => ({ ...a, type: 'closed' })),
-  ];
-
-  // Otel+oda bazında grupla (fiyat analizindeki gibi)
-  const hotelGroups = {};
-  for (const a of allAlerts) {
-    const key = `${a.hotel}__${a.room}`;
-    if (!hotelGroups[key]) hotelGroups[key] = { hotel: a.hotel, room: a.room, entries: [] };
-    hotelGroups[key].entries.push(a);
-  }
-
-  // Her grup içinde tarihe göre sırala
-  for (const group of Object.values(hotelGroups)) {
-    group.entries.sort((a, b) => {
-      const toDate = s => { const [d,m,y] = s.split('.'); return new Date(y,m-1,d); };
-      return toDate(a.checkIn) - toDate(b.checkIn);
-    });
-  }
-
-  let current = `🔍 <b>Tekel İhlali Raporu</b>\n\n`;
-
-  for (const group of Object.values(hotelGroups)) {
-    let block = `🏨 <b>${group.hotel}</b>\n🛏 ${group.room}\n`;
-    for (const a of group.entries) {
-      if (a.type === 'new') {
-        if (!a.peninsulaPrice) {
-          // Peninsula bu sayfada yok (nadir durum)
-          block += `  📅 ${a.checkIn} 🚨 AKAY girdi\n`;
-          block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
-        } else if (a.akayPrice < a.peninsulaPrice) {
-          block += `  📅 ${a.checkIn} 🚨 AKAY öne geçti\n`;
-          block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
-          block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB (Fark: ${(a.peninsulaPrice - a.akayPrice).toLocaleString('tr-TR')} RUB)\n`;
-        } else if (a.akayPrice === a.peninsulaPrice) {
-          block += `  📅 ${a.checkIn} 🟡 Fiyatlar eşit\n`;
-          block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
-        } else {
-          block += `  📅 ${a.checkIn} 🆕 Rakip girdi (biz öndeyiz)\n`;
-          block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
-          block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
-        }
-      } else {
-        block += `  📅 ${a.checkIn} ✅ AKAY kapandı\n`;
-      }
-    }
-    block += `─────────────────\n`;
-
-    if ((current + block).length > 3500) {
-      await sendTelegram(current);
-      current = `🔍 <b>Tekel İhlali Raporu (devam)</b>\n\n` + block;
-    } else {
-      current += block;
-    }
-  }
-
-  await sendTelegram(current + time);
 }
 
 async function main() {
@@ -328,9 +308,7 @@ async function main() {
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
       const batch = urls.slice(i, i + CONCURRENCY);
       const results = await Promise.all(
-        batch.map(({ url, checkIn, checkOut, hotelId, p }) =>
-          scrapePageWithDateShift(browser, url, checkIn, checkOut, p, hotelId)
-        )
+        batch.map(({ url, checkIn }) => scrapePageWithDateShift(browser, url, checkIn))
       );
       for (const { results: offers, usedUrl, usedCheckIn, shifted, originalCheckIn } of results) {
         if (offers.length > 0) {
@@ -367,7 +345,7 @@ async function main() {
 
   if (allNewAlerts.length > 0 || allClosedAlerts.length > 0) {
     console.log(`${allNewAlerts.length} yeni AKAY, ${allClosedAlerts.length} kapanan AKAY. Bildirim gonderiliyor...`);
-    await sendReport(allNewAlerts, allClosedAlerts);
+    await sendTelegramSplit(allNewAlerts, allClosedAlerts);
   } else {
     console.log('Uyari yok.');
   }
