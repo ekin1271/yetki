@@ -1,0 +1,29 @@
+name: Tekel Kontrol
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+      - env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: node scraper.js
+      - name: State dosyasını kaydet
+        run: |
+          git add tekel_state.json
+          git diff --staged --quiet || git commit -m "state güncellendi"
+          git pull origin main --rebase --strategy-option=theirs
+          git push origin main
