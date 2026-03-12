@@ -6,13 +6,11 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const STATE_FILE = 'tekel_state.json';
 const HOTELS_FILE = 'hotels.json';
 
-// Sadece Peninsula ve AKAY
 const AGENCY_RULES = [
   { pattern: '103810219', name: 'PENINSULA' },
   { pattern: '103816', name: 'AKAY' },
 ];
 
-// hotels.json yükleme
 function loadHotels() {
   if (fs.existsSync(HOTELS_FILE)) {
     return JSON.parse(fs.readFileSync(HOTELS_FILE, 'utf8'));
@@ -20,7 +18,6 @@ function loadHotels() {
   return [];
 }
 
-// 3 ay için tarihler
 function generateDates() {
   const dates = [];
   const now = new Date();
@@ -53,7 +50,6 @@ function generateDates() {
   return dates;
 }
 
-// URLs oluşturma
 function generateUrls() {
   const hotels = loadHotels();
   const dates = generateDates();
@@ -68,7 +64,6 @@ function generateUrls() {
   return urls;
 }
 
-// Telegram bildirimi
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) { console.log(text); return; }
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -81,7 +76,6 @@ async function sendTelegram(text) {
   else console.log('Telegram bildirimi gonderildi.');
 }
 
-// Telegram split bildirimi (Tekel raporu formatı)
 async function sendTelegramSplit(newAlerts, closedAlerts) {
   const time = `\n🕐 ${new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' })}`;
   const allAlerts = [
@@ -139,7 +133,6 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
   await sendTelegram(current + time);
 }
 
-// Sayfa scraping
 async function scrapePageOnce(browser, targetUrl, checkIn) {
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -151,9 +144,10 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
 
   const urlDateMatch = targetUrl.match(/data=(\d{2}\.\d{2}\.\d{4})/);
   const targetDate = urlDateMatch ? urlDateMatch[1] : null;
+  const targetHotelId = (targetUrl.match(/F4=(\d+)/) || [])[1] || null;
   const agencyRulesStr = JSON.stringify(AGENCY_RULES);
 
-  const results = await page.evaluate((agencyRulesStr, targetDate) => {
+  const results = await page.evaluate((agencyRulesStr, targetDate, targetHotelId) => {
     const agencyRules = JSON.parse(agencyRulesStr);
 
     function identifyAgency(id) {
@@ -164,10 +158,17 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
     const offers = [];
     const allRows = document.querySelectorAll('table tr');
     let currentHotel = '';
+    let currentHotelId = '';
 
     for (const tr of allRows) {
       const hotelLink = tr.querySelector('a[href*="action=shw"]');
-      if (hotelLink) currentHotel = hotelLink.textContent.trim();
+      if (hotelLink) {
+        const href = hotelLink.getAttribute('href') || '';
+        const idMatch = href.match(/id=(\d+)/);
+        currentHotelId = idMatch ? idMatch[1] : '';
+        currentHotel = hotelLink.textContent.trim();
+      }
+      if (targetHotelId && currentHotelId !== targetHotelId) continue;
 
       const agencyLis = tr.querySelectorAll('li.s8.i_t1');
       if (agencyLis.length === 0) continue;
@@ -201,7 +202,29 @@ async function scrapePageOnce(browser, targetUrl, checkIn) {
   return results;
 }
 
-// Fiyat analizi
+async function scrapePageWithDateShift(browser, targetUrl, checkIn) {
+  let results = await scrapePageOnce(browser, targetUrl, checkIn);
+  if (results.length > 0) return { results, usedUrl: targetUrl, usedCheckIn: checkIn };
+
+  const [d, m, y] = checkIn.split('.');
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + 5);
+  const nd = String(date.getDate()).padStart(2, '0');
+  const nm = String(date.getMonth() + 1).padStart(2, '0');
+  const ny = date.getFullYear();
+  const newCheckIn = `${nd}.${nm}.${ny}`;
+  const outDate = new Date(date);
+  outDate.setDate(outDate.getDate() + 7);
+  const od = String(outDate.getDate()).padStart(2, '0');
+  const om = String(outDate.getMonth() + 1).padStart(2, '0');
+  const oy = outDate.getFullYear();
+  const newCheckOut = `${od}.${om}.${oy}`;
+  const newUrl = targetUrl.replace(/data=\d{2}\.\d{2}\.\d{4}/, `data=${newCheckIn}`).replace(/d2=\d{2}\.\d{2}\.\d{4}/, `d2=${newCheckOut}`);
+
+  results = await scrapePageOnce(browser, newUrl, newCheckIn);
+  return { results, usedUrl: newUrl, usedCheckIn: newCheckIn, shifted: true, originalCheckIn: checkIn };
+}
+
 function analyzeOffers(checkIn, offers, prevState, newState) {
   const newAlerts = [];
   const closedAlerts = [];
@@ -229,16 +252,15 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
   return { newAlerts, closedAlerts };
 }
 
-// State işlemleri
 function loadState() {
   if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   return {};
 }
+
 function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
 }
 
-// Ana fonksiyon
 async function main() {
   console.log('Tarama basliyor...');
   const dates = generateDates();
@@ -254,7 +276,7 @@ async function main() {
 
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu'],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
   });
 
   try {
@@ -269,23 +291,26 @@ async function main() {
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
       const batch = urls.slice(i, i + CONCURRENCY);
       const results = await Promise.all(
-        batch.map(({ url, checkIn }) => scrapePageOnce(browser, url, checkIn))
+        batch.map(({ url, checkIn }) => scrapePageWithDateShift(browser, url, checkIn))
       );
-      for (let j=0;j<results.length;j++) {
-        const offers = results[j];
-        const { checkIn } = batch[j];
+      for (const { results: offers, usedUrl, usedCheckIn, shifted, originalCheckIn } of results) {
         if (offers.length > 0) {
-          if (!offersByDate[checkIn]) offersByDate[checkIn] = [];
-          offersByDate[checkIn].push(...offers);
-        } else emptyUrls.push({ checkIn, url: batch[j].url });
+          if (!offersByDate[usedCheckIn]) offersByDate[usedCheckIn] = [];
+          offersByDate[usedCheckIn].push(...offers);
+        } else {
+          emptyUrls.push({ url: usedUrl, checkIn: usedCheckIn, originalCheckIn: shifted ? originalCheckIn : null });
+        }
       }
       completed += batch.length;
-      if (completed % 50 === 0 || completed === urls.length) console.log(`  ${completed}/${urls.length} tamamlandi`);
+      if (completed % 100 === 0 || completed === urls.length) console.log(`  ${completed}/${urls.length} tamamlandi`);
     }
 
     if (emptyUrls.length > 0) {
-      console.log(`\n--- BOŞ GELEN URL'LER (${emptyUrls.length}) ---`);
-      for (const u of emptyUrls) console.log(`  [BOŞ] ${u.checkIn} - ${u.url}`);
+      console.log(`\n--- BOŞ GELEN URL'LER (${emptyUrls.length} adet) ---`);
+      for (const { url, checkIn, originalCheckIn } of emptyUrls) {
+        const dateInfo = originalCheckIn ? `${originalCheckIn} → ${checkIn} (kaydırıldı)` : checkIn;
+        console.log(`  [BOŞ] ${dateInfo} - ${url}`);
+      }
       console.log('---');
     }
 
@@ -294,7 +319,9 @@ async function main() {
       allNewAlerts.push(...newAlerts);
       allClosedAlerts.push(...closedAlerts);
     }
-  } finally { await browser.close(); }
+  } finally {
+    await browser.close();
+  }
 
   saveState(newState);
   console.log('State kaydedildi.');
@@ -302,7 +329,9 @@ async function main() {
   if (allNewAlerts.length > 0 || allClosedAlerts.length > 0) {
     console.log(`${allNewAlerts.length} yeni AKAY, ${allClosedAlerts.length} kapanan AKAY. Bildirim gonderiliyor...`);
     await sendTelegramSplit(allNewAlerts, allClosedAlerts);
-  } else console.log('Uyari yok.');
+  } else {
+    console.log('Uyari yok.');
+  }
 }
 
 main().catch(async err => {
