@@ -19,14 +19,10 @@ function generateDates() {
   const today = new Date();
   const first = new Date(today);
   first.setDate(first.getDate() + 5);
-
-  // Eğer ilk tarih mart içindeyse nisana atla
   if (first.getMonth() === 2) {
     first.setFullYear(first.getFullYear(), 3, 15);
   }
-
   const dates = [];
-  // İlk tarih: ayın 15'i
   const d1 = new Date(first.getFullYear(), first.getMonth(), 15);
   for (let i = 0; i < 3; i++) {
     const d = new Date(d1.getFullYear(), d1.getMonth() + i, 15);
@@ -48,7 +44,17 @@ function buildUrl(hotelId, checkIn) {
   return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotelId}&ins=0-40000-EUR&flt=100411293179&p=0100319900.0100319900`;
 }
 
-async function scrapePageOnce(browser, url, checkIn) {
+function parsePrice(str) {
+  if (!str) return null;
+  const n = parseInt(String(str).replace(/\s/g, '').replace(/[^\d]/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+
+function formatPrice(n) {
+  return n.toLocaleString('ru-RU') + ' RUB';
+}
+
+async function scrapePageOnce(browser, url) {
   const page = await browser.newPage();
   await page.setDefaultNavigationTimeout(60000);
   try {
@@ -57,7 +63,7 @@ async function scrapePageOnce(browser, url, checkIn) {
 
     const results = await page.evaluate((PENINSULA_ID, RIVALS) => {
       const rows = document.querySelectorAll('li.s8.i_t1');
-      const found = { peninsula: false, rivals: [] };
+      const offers = [];
 
       rows.forEach(row => {
         const urrAttr = row.getAttribute('urr') || '';
@@ -65,18 +71,25 @@ async function scrapePageOnce(browser, url, checkIn) {
         if (!match) return;
         const opId = match[1];
 
+        const hotelEl = row.querySelector('a[href*="action=shw"]');
+        const hotelName = hotelEl ? hotelEl.textContent.trim() : '';
+        const priceEl = row.querySelector('td.c_pe b');
+        const price = priceEl ? priceEl.textContent.trim() : '';
+        const roomEl = row.querySelector('td.c_ht');
+        const roomName = roomEl ? roomEl.textContent.trim() : '';
+
         if (opId === PENINSULA_ID) {
-          found.peninsula = true;
+          offers.push({ type: 'peninsula', hotelName, roomName, price });
         } else {
           for (const [name, id] of Object.entries(RIVALS)) {
             if (opId === id) {
-              found.rivals.push(name);
+              offers.push({ type: 'rival', rivalName: name, hotelName, roomName, price });
             }
           }
         }
       });
 
-      return found;
+      return offers;
     }, PENINSULA_ID, RIVALS);
 
     return results;
@@ -89,11 +102,9 @@ async function scrapePageOnce(browser, url, checkIn) {
 
 async function scrapeWithDateShift(browser, hotelId, checkIn) {
   const url = buildUrl(hotelId, checkIn);
-  const result = await scrapePageOnce(browser, url, checkIn);
+  const result = await scrapePageOnce(browser, url);
+  if (result !== null) return { result, usedCheckIn: checkIn, usedUrl: url, taskCheckIn: checkIn };
 
-  if (result !== null) return { result, usedCheckIn: checkIn, usedUrl: url };
-
-  // Boş geldi — 5 gün kaydır
   const [d, m, y] = checkIn.split('.');
   const date = new Date(y, m - 1, d);
   date.setDate(date.getDate() + 5);
@@ -101,14 +112,8 @@ async function scrapeWithDateShift(browser, hotelId, checkIn) {
   const nm = String(date.getMonth() + 1).padStart(2, '0');
   const newCheckIn = `${nd}.${nm}.${date.getFullYear()}`;
   const newUrl = buildUrl(hotelId, newCheckIn);
-
-  const result2 = await scrapePageOnce(browser, newUrl, newCheckIn);
-  return {
-    result: result2,
-    usedCheckIn: newCheckIn,
-    usedUrl: newUrl,
-    originalCheckIn: checkIn
-  };
+  const result2 = await scrapePageOnce(browser, newUrl);
+  return { result: result2, usedCheckIn: newCheckIn, usedUrl: newUrl, taskCheckIn: checkIn };
 }
 
 async function sendTelegram(message) {
@@ -127,31 +132,73 @@ async function sendTelegram(message) {
   if (!data.ok) throw new Error(`Telegram hata: ${JSON.stringify(data)}`);
 }
 
-async function sendTelegramSplit(alerts) {
-  if (alerts.length === 0) return;
+async function sendTelegramAlerts(openedAlerts, closedAlerts) {
+  if (openedAlerts.length === 0 && closedAlerts.length === 0) return;
 
   const now = new Date();
   const ts = `${String(now.getDate()).padStart(2,'0')}.${String(now.getMonth()+1).padStart(2,'0')}.${now.getFullYear()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
 
-  // Otele göre grupla
-  const byHotel = {};
-  for (const a of alerts) {
-    if (!byHotel[a.hotelId]) byHotel[a.hotelId] = [];
-    byHotel[a.hotelId].push(a);
+  let msg = '🔍 <b>Tekel İhlali Raporu</b>\n\n';
+
+  if (openedAlerts.length > 0) {
+    const byHotel = {};
+    for (const a of openedAlerts) {
+      if (!byHotel[a.hotelName]) byHotel[a.hotelName] = [];
+      byHotel[a.hotelName].push(a);
+    }
+
+    for (const hotelName of Object.keys(byHotel)) {
+      msg += `🏨 ${hotelName}\n`;
+      const byRoom = {};
+      for (const a of byHotel[hotelName]) {
+        const rk = a.roomName || '-';
+        if (!byRoom[rk]) byRoom[rk] = [];
+        byRoom[rk].push(a);
+      }
+      for (const roomName of Object.keys(byRoom)) {
+        if (roomName && roomName !== '-') msg += `🛏 ${roomName}\n`;
+        for (const a of byRoom[roomName]) {
+          if (a.penPrice !== null && a.rivalPrice !== null) {
+            const diff = Math.abs(a.penPrice - a.rivalPrice);
+            if (a.rivalPrice < a.penPrice) {
+              msg += `  📅 ${a.checkIn} 🚨 Rakip öne geçti\n`;
+              msg += `     📌 Peninsula: ${formatPrice(a.penPrice)}\n`;
+              msg += `     🏆 ${a.rivalName}: ${formatPrice(a.rivalPrice)} (Fark: ${formatPrice(diff)})\n`;
+            } else if (a.rivalPrice === a.penPrice) {
+              msg += `  📅 ${a.checkIn} 🟡 Fiyatlar eşitleşti\n`;
+              msg += `     📌 Peninsula = ${a.rivalName}: ${formatPrice(a.penPrice)}\n`;
+            } else {
+              msg += `  📅 ${a.checkIn} 🆕 Rakip girdi (biz öndeyiz)\n`;
+              msg += `     📌 Peninsula: ${formatPrice(a.penPrice)}\n`;
+              msg += `     🏆 ${a.rivalName}: ${formatPrice(a.rivalPrice)} (Fark: ${formatPrice(diff)})\n`;
+            }
+          } else {
+            msg += `  📅 ${a.checkIn} 🆕 ${a.rivalName} girdi\n`;
+          }
+        }
+      }
+      msg += '─────────────────\n';
+    }
   }
 
-  let msg = '🚨 <b>Tekel İhlali Raporu</b>\n\n';
-  for (const hotelId of Object.keys(byHotel)) {
-    const hotelAlerts = byHotel[hotelId];
-    msg += `🏨 Otel ID: ${hotelId}\n`;
-    for (const a of hotelAlerts) {
-      msg += `  📅 ${a.checkIn} — ${a.rival} açtı\n`;
+  if (closedAlerts.length > 0) {
+    msg += '\n✅ <b>Kapanan Rakipler</b>\n\n';
+    const byHotel = {};
+    for (const a of closedAlerts) {
+      if (!byHotel[a.hotelName]) byHotel[a.hotelName] = [];
+      byHotel[a.hotelName].push(a);
     }
-    msg += '─────────────────\n';
+    for (const hotelName of Object.keys(byHotel)) {
+      msg += `🏨 ${hotelName}\n`;
+      for (const a of byHotel[hotelName]) {
+        msg += `  📅 ${a.checkIn} ✅ ${a.rivalName} kapandı\n`;
+      }
+      msg += '─────────────────\n';
+    }
   }
+
   msg += `\n🕐 ${ts}`;
 
-  // Telegram 4096 karakter limiti
   const chunks = [];
   while (msg.length > 4000) {
     chunks.push(msg.slice(0, 4000));
@@ -166,7 +213,7 @@ async function main() {
   const prevState = fs.existsSync(STATE_FILE)
     ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'))
     : {};
-  const newState = { ...prevState };
+  const newState = {};
 
   const dates = generateDates();
   const totalUrls = hotels.length * dates.length;
@@ -188,34 +235,115 @@ async function main() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
 
-  const alerts = [];
+  const openedAlerts = [];
+  const closedAlerts = [];
   const emptyUrls = [];
   let completed = 0;
+
+  // Otel adlarını state'te saklamak için
+  const hotelNames = {};
 
   for (let i = 0; i < tasks.length; i += CONCURRENCY) {
     const batch = tasks.slice(i, i + CONCURRENCY);
     const results = await Promise.all(
       batch.map(({ hotelId, checkIn }) =>
         scrapeWithDateShift(browser, hotelId, checkIn)
-          .then(r => ({ ...r, hotelId, originalCheckIn: r.originalCheckIn || checkIn }))
+          .then(r => ({ ...r, hotelId, taskCheckIn: checkIn }))
       )
     );
 
-    for (const { result, usedCheckIn, usedUrl, hotelId, originalCheckIn } of results) {
+    for (const { result, usedCheckIn, usedUrl, hotelId, taskCheckIn } of results) {
+      const stateKey = (rival) => `${hotelId}_${taskCheckIn}_${rival}`;
+
       if (result === null) {
-        emptyUrls.push({ url: usedUrl, checkIn: usedCheckIn, originalCheckIn: usedCheckIn !== originalCheckIn ? originalCheckIn : null });
-      } else {
-        // State kontrolü
-        for (const rival of result.rivals) {
-          const key = `${hotelId}_${originalCheckIn}_${rival}`;
-          if (!prevState[key]) {
-            // Yeni rakip girdi
-            alerts.push({ hotelId, checkIn: usedCheckIn, rival });
-            newState[key] = 'detected';
-          }
-          // Zaten bilinen → sessiz
+        emptyUrls.push({
+          url: usedUrl,
+          checkIn: usedCheckIn,
+          originalCheckIn: usedCheckIn !== taskCheckIn ? taskCheckIn : null
+        });
+        // State'i koru
+        for (const rival of Object.keys(RIVALS)) {
+          const key = stateKey(rival);
+          if (prevState[key]) newState[key] = prevState[key];
         }
-        // Peninsula yoksa bile state güncelleme (normal)
+        continue;
+      }
+
+      // Otel adını kaydet
+      const penRow = result.find(o => o.type === 'peninsula');
+      const anyRow = result.find(o => o.hotelName);
+      if (anyRow) hotelNames[hotelId] = anyRow.hotelName;
+
+      // Peninsula fiyatlarını otel+oda bazında
+      const penPrices = {};
+      for (const o of result) {
+        if (o.type === 'peninsula') {
+          const k = `${o.hotelName}||${o.roomName}`;
+          const p = parsePrice(o.price);
+          if (p !== null && (!penPrices[k] || p < penPrices[k].price)) {
+            penPrices[k] = { hotelName: o.hotelName, roomName: o.roomName, price: p };
+          }
+        }
+      }
+
+      // Rakip fiyatlarını otel+oda+rakip bazında
+      const rivalMap = {};
+      for (const o of result) {
+        if (o.type === 'rival') {
+          const k = `${o.hotelName}||${o.roomName}||${o.rivalName}`;
+          const p = parsePrice(o.price);
+          if (p !== null && (!rivalMap[k] || p < rivalMap[k].price)) {
+            rivalMap[k] = { hotelName: o.hotelName, roomName: o.roomName, price: p, rivalName: o.rivalName };
+          }
+        }
+      }
+
+      const activeRivals = new Set(result.filter(o => o.type === 'rival').map(o => o.rivalName));
+
+      for (const rival of Object.keys(RIVALS)) {
+        const key = stateKey(rival);
+        const wasPresent = prevState[key] === 'present';
+        const isPresent = activeRivals.has(rival);
+
+        if (isPresent) {
+          newState[key] = 'present';
+          if (!wasPresent) {
+            // En iyi eşleşmeyi bul (en düşük rakip fiyatı)
+            let best = null;
+            for (const [rk, rv] of Object.entries(rivalMap)) {
+              if (rv.rivalName !== rival) continue;
+              const pk = `${rv.hotelName}||${rv.roomName}`;
+              const pp = penPrices[pk] ? penPrices[pk].price : null;
+              if (!best || rv.price < best.rivalPrice) {
+                best = {
+                  hotelName: rv.hotelName,
+                  roomName: rv.roomName,
+                  rivalPrice: rv.price,
+                  penPrice: pp
+                };
+              }
+            }
+            openedAlerts.push({
+              hotelId,
+              hotelName: best ? best.hotelName : (hotelNames[hotelId] || hotelId),
+              roomName: best ? best.roomName : '',
+              checkIn: usedCheckIn,
+              rivalName: rival,
+              penPrice: best ? best.penPrice : null,
+              rivalPrice: best ? best.rivalPrice : null
+            });
+          }
+        } else {
+          newState[key] = 'absent';
+          if (wasPresent) {
+            closedAlerts.push({
+              hotelId,
+              hotelName: hotelNames[hotelId] || hotelId,
+              checkIn: usedCheckIn,
+              rivalName: rival
+            });
+          }
+        }
       }
     }
 
@@ -239,9 +367,10 @@ async function main() {
   fs.writeFileSync(STATE_FILE, JSON.stringify(newState, null, 2));
   console.log('State kaydedildi.');
 
-  if (alerts.length > 0) {
-    console.log(`${alerts.length} tekel ihlali bildirimi gonderiliyor...`);
-    await sendTelegramSplit(alerts);
+  const total = openedAlerts.length + closedAlerts.length;
+  if (total > 0) {
+    console.log(`${openedAlerts.length} açılma, ${closedAlerts.length} kapanma bildirimi gonderiliyor...`);
+    await sendTelegramAlerts(openedAlerts, closedAlerts);
     console.log('Telegram bildirimi gonderildi.');
   } else {
     console.log('Tekel ihlali yok.');
