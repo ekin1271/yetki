@@ -3,15 +3,16 @@ const fs = require('fs');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const STATE_FILE = 'tekel_state.json';
+const STATE_FILE = 'tekel_state.json';       // FARK 1
 const HOTELS_FILE = 'hotels.json';
 
+// FARK 2: Sadece Peninsula ve AKAY
 const AGENCY_RULES = [
   { pattern: '103810219', name: 'PENINSULA' },
   { pattern: '103816', name: 'AKAY' },
 ];
 
-function loadHotels() {
+function loadHotelIds() {
   if (fs.existsSync(HOTELS_FILE)) {
     return JSON.parse(fs.readFileSync(HOTELS_FILE, 'utf8'));
   }
@@ -21,6 +22,7 @@ function loadHotels() {
 function generateDates() {
   const dates = [];
   const now = new Date();
+
   const firstDate = new Date(now);
   firstDate.setDate(firstDate.getDate() + 5);
 
@@ -29,6 +31,7 @@ function generateDates() {
     firstDate.setDate(15);
   }
 
+  // FARK 3: 3 ay
   for (let m = 0; m < 3; m++) {
     const d = m === 0
       ? new Date(firstDate)
@@ -38,27 +41,25 @@ function generateDates() {
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const year = d.getFullYear();
     const checkIn = `${day}.${month}.${year}`;
-
     const outDate = new Date(d);
     outDate.setDate(outDate.getDate() + 7);
-    const od = String(outDate.getDate()).padStart(2, '0');
-    const om = String(outDate.getMonth() + 1).padStart(2, '0');
-    const checkOut = `${od}.${om}.${outDate.getFullYear()}`;
-
+    const outDay = String(outDate.getDate()).padStart(2, '0');
+    const outMonth = String(outDate.getMonth() + 1).padStart(2, '0');
+    const checkOut = `${outDay}.${outMonth}.${outDate.getFullYear()}`;
     dates.push({ checkIn, checkOut });
   }
   return dates;
 }
 
 function generateUrls() {
-  const hotels = loadHotels();
+  const hotelIds = loadHotelIds();
   const dates = generateDates();
   const urls = [];
 
   for (const { checkIn, checkOut } of dates) {
-    for (const hotel of hotels) {
-      const url = `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
-      urls.push({ url, checkIn, hotelId: hotel.id });
+    for (const hotelId of hotelIds) {
+      const url = `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotelId}&ins=0-40000-EUR&flt=100411293179&p=0100319900.0100319900`;
+      urls.push({ url, checkIn, hotelId });
     }
   }
   return urls;
@@ -76,6 +77,7 @@ async function sendTelegram(text) {
   else console.log('Telegram bildirimi gonderildi.');
 }
 
+// FARK 4: Tekel raporu formatı
 async function sendTelegramSplit(newAlerts, closedAlerts) {
   const time = `\n🕐 ${new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' })}`;
   const allAlerts = [
@@ -133,42 +135,44 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
   await sendTelegram(current + time);
 }
 
+// === AŞAĞISI FİYAT ANALİZİ İLE BİREBİR AYNI ===
+
 async function scrapePageOnce(browser, targetUrl, checkIn) {
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
   await page.setViewport({ width: 1920, height: 1080 });
 
-  try { await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }); } catch(e) {}
-  try { await page.waitForSelector('li.s8.i_t1', { timeout: 30000 }); } catch(e) {}
+  try {
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch(e) {}
+
+  try {
+    await page.waitForSelector('li.s8.i_t1', { timeout: 30000 });
+  } catch(e) {}
+
   await new Promise(r => setTimeout(r, 2000));
 
   const urlDateMatch = targetUrl.match(/data=(\d{2}\.\d{2}\.\d{4})/);
   const targetDate = urlDateMatch ? urlDateMatch[1] : null;
-  const targetHotelId = (targetUrl.match(/F4=(\d+)/) || [])[1] || null;
   const agencyRulesStr = JSON.stringify(AGENCY_RULES);
 
-  const results = await page.evaluate((agencyRulesStr, targetDate, targetHotelId) => {
+  const results = await page.evaluate((agencyRulesStr, targetDate) => {
     const agencyRules = JSON.parse(agencyRulesStr);
 
     function identifyAgency(id) {
-      for (const rule of agencyRules) if (id.includes(rule.pattern)) return rule.name;
+      for (const rule of agencyRules) {
+        if (id.includes(rule.pattern)) return rule.name;
+      }
       return 'BILINMEYEN';
     }
 
     const offers = [];
     const allRows = document.querySelectorAll('table tr');
     let currentHotel = '';
-    let currentHotelId = '';
 
     for (const tr of allRows) {
       const hotelLink = tr.querySelector('a[href*="action=shw"]');
-      if (hotelLink) {
-        const href = hotelLink.getAttribute('href') || '';
-        const idMatch = href.match(/id=(\d+)/);
-        currentHotelId = idMatch ? idMatch[1] : '';
-        currentHotel = hotelLink.textContent.trim();
-      }
-      if (targetHotelId && currentHotelId !== targetHotelId) continue;
+      if (hotelLink) currentHotel = hotelLink.textContent.trim();
 
       const agencyLis = tr.querySelectorAll('li.s8.i_t1');
       if (agencyLis.length === 0) continue;
@@ -225,6 +229,7 @@ async function scrapePageWithDateShift(browser, targetUrl, checkIn) {
   return { results, usedUrl: newUrl, usedCheckIn: newCheckIn, shifted: true, originalCheckIn: checkIn };
 }
 
+// FARK 4: present/absent mantığı
 function analyzeOffers(checkIn, offers, prevState, newState) {
   const newAlerts = [];
   const closedAlerts = [];
@@ -233,19 +238,30 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
   for (const offer of offers) {
     const key = `${checkIn}__${offer.hotelName}__${offer.roomType}`;
     if (!groups[key]) groups[key] = { hotelName: offer.hotelName, roomType: offer.roomType, peninsula: null, akay: null };
-    if (offer.agency === 'PENINSULA') groups[key].peninsula = offer.priceRub;
-    else if (offer.agency === 'AKAY') groups[key].akay = offer.priceRub;
+    if (offer.agency === 'PENINSULA') {
+      if (!groups[key].peninsula || offer.priceRub < groups[key].peninsula)
+        groups[key].peninsula = offer.priceRub;
+    } else if (offer.agency === 'AKAY') {
+      if (!groups[key].akay || offer.priceRub < groups[key].akay)
+        groups[key].akay = offer.priceRub;
+    }
   }
 
   for (const [key, data] of Object.entries(groups)) {
     if (!data.peninsula) continue;
+
     const prevStatus = prevState[key];
+
     if (!data.akay) {
       newState[key] = 'absent';
-      if (prevStatus === 'present') closedAlerts.push({ checkIn, hotel: data.hotelName, room: data.roomType });
+      if (prevStatus === 'present') {
+        closedAlerts.push({ checkIn, hotel: data.hotelName, room: data.roomType });
+      }
     } else {
       newState[key] = 'present';
-      if (prevStatus !== 'present') newAlerts.push({ checkIn, hotel: data.hotelName, room: data.roomType, peninsulaPrice: data.peninsula, akayPrice: data.akay });
+      if (prevStatus !== 'present') {
+        newAlerts.push({ checkIn, hotel: data.hotelName, room: data.roomType, peninsulaPrice: data.peninsula, akayPrice: data.akay });
+      }
     }
   }
 
@@ -266,8 +282,8 @@ async function main() {
   const dates = generateDates();
   console.log('Taranan aylar:', dates.map(d => d.checkIn).join(', '));
 
-  const hotels = loadHotels();
-  console.log(`Otel sayisi: ${hotels.length}`);
+  const hotelIds = loadHotelIds();
+  console.log(`Otel sayisi: ${hotelIds.length}`);
 
   const prevState = loadState();
   const newState = { ...prevState };
