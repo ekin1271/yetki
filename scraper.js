@@ -16,7 +16,7 @@ const AGENCY_RULES = [
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─── Puppeteer ile sayfa çek ve parse et ─────────────────────────────────────
-async function fetchAndParse(browser, url, checkIn) {
+async function fetchAndParse(browser, url, checkIn, hotelId) {
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
   await page.setViewport({ width: 1920, height: 1080 });
@@ -27,7 +27,7 @@ async function fetchAndParse(browser, url, checkIn) {
 
   const agencyRulesStr = JSON.stringify(AGENCY_RULES);
 
-  const offers = await page.evaluate((agencyRulesStr, targetDate) => {
+  const offers = await page.evaluate((agencyRulesStr, targetDate, expectedHotelId) => {
     const agencyRules = JSON.parse(agencyRulesStr);
 
     function identifyAgency(urr) {
@@ -46,6 +46,15 @@ async function fetchAndParse(browser, url, checkIn) {
     // Sadece ilk div.b-pr — komşu otelleri atla
     const block = document.querySelector('div.b-pr');
     if (!block) return offers;
+
+    // data-hid kontrolü: sayfadaki otel ID'si beklenenle eşleşmiyorsa geç
+    if (expectedHotelId) {
+      const nameDiv = block.querySelector('div.name[data-hid]');
+      if (nameDiv) {
+        const dataHid = nameDiv.getAttribute('data-hid');
+        if (dataHid && dataHid !== expectedHotelId) return offers;
+      }
+    }
 
     const allRows = block.querySelectorAll('tr');
 
@@ -82,10 +91,32 @@ async function fetchAndParse(browser, url, checkIn) {
     }
 
     return offers;
-  }, agencyRulesStr, checkIn);
+  }, agencyRulesStr, checkIn, hotelId);
 
   await page.close();
   return offers;
+}
+
+// ─── Date shift wrapper ──────────────────────────────────────────────────────
+async function fetchAndParseWithDateShift(browser, url, checkIn, hotelId) {
+  const offers = await fetchAndParse(browser, url, checkIn, hotelId);
+  if (offers.length > 0) return { offers, usedCheckIn: checkIn };
+
+  // Boş sayfa — +5 gün dene
+  const [d, m, y] = checkIn.split('.');
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + 5);
+  const fmt = n => String(n).padStart(2, '0');
+  const newCheckIn  = `${fmt(date.getDate())}.${fmt(date.getMonth()+1)}.${date.getFullYear()}`;
+  const out = new Date(date);
+  out.setDate(out.getDate() + 7);
+  const newCheckOut = `${fmt(out.getDate())}.${fmt(out.getMonth()+1)}.${out.getFullYear()}`;
+  const newUrl = url
+    .replace(/data=\d{2}\.\d{2}\.\d{4}/, `data=${newCheckIn}`)
+    .replace(/d2=\d{2}\.\d{2}\.\d{4}/,   `d2=${newCheckOut}`);
+
+  const offers2 = await fetchAndParse(browser, newUrl, newCheckIn, hotelId);
+  return { offers: offers2, usedCheckIn: newCheckIn };
 }
 
 // ─── Otel listesi & URL üretimi ──────────────────────────────────────────────
@@ -284,10 +315,10 @@ async function main() {
 
     await runConcurrent(tasks.map(task => async () => {
       try {
-        const offers = await fetchAndParse(browser, task.url, task.checkIn);
+        const { offers, usedCheckIn } = await fetchAndParseWithDateShift(browser, task.url, task.checkIn, task.hotel.id);
         for (const o of offers) {
-          if (!offersByDate[task.checkIn]) offersByDate[task.checkIn] = [];
-          offersByDate[task.checkIn].push(o);
+          if (!offersByDate[usedCheckIn]) offersByDate[usedCheckIn] = [];
+          offersByDate[usedCheckIn].push(o);
         }
       } catch (e) {
         errors++;
