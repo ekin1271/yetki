@@ -7,6 +7,6 @@
     "start": "node scraper.js"
   },
   "dependencies": {
-    "node-html-parser": "^6.1.13"
+    "puppeteer": "^22.0.0"
   }
 }
