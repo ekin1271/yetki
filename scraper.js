@@ -11,7 +11,7 @@ const AGENCY_RULES = [
   { pattern: '103816', name: 'AKAY' },
 ];
 
-function loadHotelIds() {
+function loadHotels() {
   if (fs.existsSync(HOTELS_FILE)) {
     return JSON.parse(fs.readFileSync(HOTELS_FILE, 'utf8'));
   }
@@ -50,14 +50,14 @@ function generateDates() {
 }
 
 function generateUrls() {
-  const hotelIds = loadHotelIds();
+  const hotels = loadHotels();
   const dates = generateDates();
   const urls = [];
 
   for (const { checkIn, checkOut } of dates) {
-    for (const hotelId of hotelIds) {
-      const url = `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotelId}&ins=0-40000-EUR&flt=100411293179&p=0100319900.0100319900`;
-      urls.push({ url, checkIn, hotelId });
+    for (const hotel of hotels) {
+      const url = `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
+      urls.push({ url, checkIn, hotelId: hotel.id });
     }
   }
   return urls;
@@ -253,8 +253,8 @@ async function main() {
   const dates = generateDates();
   console.log('Taranan aylar:', dates.map(d => d.checkIn).join(', '));
 
-  const hotelIds = loadHotelIds();
-  console.log(`Otel sayisi: ${hotelIds.length}`);
+  const hotels = loadHotels();
+  console.log(`Otel sayisi: ${hotels.length}`);
 
   const prevState = loadState();
   const newState = { ...prevState };
@@ -301,6 +301,7 @@ async function main() {
     }
 
     for (const [checkIn, offers] of Object.entries(offersByDate)) {
+      console.log(`  [${checkIn}] ${offers.length} teklif bulundu`);
       const { newAlerts, closedAlerts } = analyzeOffers(checkIn, offers, prevState, newState);
       allNewAlerts.push(...newAlerts);
       allClosedAlerts.push(...closedAlerts);
