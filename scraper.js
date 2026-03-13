@@ -67,22 +67,18 @@ async function fetchAndParse(browser, url, checkIn) {
       const agency = identifyAgency(urr);
       if (!agency) continue;
 
-      let priceRub = null;
-      const bR = tr.querySelector('b.r');
-      if (bR) priceRub = parseInt(bR.textContent.replace(/\D/g, ''), 10) || null;
-      if (!priceRub) {
-        const pe = tr.querySelector('td.c_pe b');
-        if (pe) priceRub = parseInt(pe.textContent.replace(/\D/g, ''), 10) || null;
+      let price = null;
+      const priceLink = tr.querySelector('td.c_pe a[href*="x="]');
+      if (priceLink) {
+        const m = (priceLink.getAttribute('href') || '').match(/[?&]x=(\d+)/);
+        if (m) price = parseInt(m[1], 10) || null;
       }
-      if (!priceRub) continue;
+      if (!price) continue;
 
       const roomTd = tr.querySelector('td.c_ns');
       const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
 
-      const dateMatch = urr.match(/[&?]data=([^&]+)/);
-      const checkInFromUrr = dateMatch ? decodeURIComponent(dateMatch[1]) : null;
-
-      offers.push({ agency, hotelName, roomType, priceRub, checkInFromUrr });
+      offers.push({ agency, hotelName, roomType, price });
     }
 
     return offers;
@@ -124,7 +120,8 @@ function generateDates() {
 }
 
 function buildUrl(hotel, checkIn, checkOut) {
-  return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
+  const idPrice = hotel.id_price || '121110211811';
+  return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=${idPrice}&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
 }
 
 // ─── Telegram ────────────────────────────────────────────────────────────────
@@ -172,17 +169,17 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
       if (a.type === 'closed') {
         block += `  📅 ${a.checkIn} ✅ AKAY kapandı\n`;
       } else if (a.akayPrice < a.peninsulaPrice) {
-        const fark = (a.peninsulaPrice - a.akayPrice).toLocaleString('tr-TR');
+        const fark = a.peninsulaPrice - a.akayPrice;
         block += `  📅 ${a.checkIn} 🚨 AKAY girdi (gerideyiz)\n`;
-        block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
-        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB (Fark: ${fark} RUB)\n`;
+        block += `     📌 Peninsula: ${a.peninsulaPrice} EUR\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice} EUR (Fark: ${fark} EUR)\n`;
       } else if (a.akayPrice === a.peninsulaPrice) {
         block += `  📅 ${a.checkIn} 🟡 AKAY girdi (fiyatlar eşit)\n`;
-        block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice} EUR\n`;
       } else {
         block += `  📅 ${a.checkIn} 🆕 AKAY girdi (öndeyiz)\n`;
-        block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
-        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `     📌 Peninsula: ${a.peninsulaPrice} EUR\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice} EUR\n`;
       }
     }
     block += `─────────────────\n`;
@@ -216,9 +213,9 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
     const key = `${checkIn}__${o.hotelName}__${o.roomType}`;
     if (!groups[key]) groups[key] = { hotelName: o.hotelName, roomType: o.roomType, peninsula: null, akay: null };
     if (o.agency === 'PENINSULA') {
-      if (!groups[key].peninsula || o.priceRub < groups[key].peninsula) groups[key].peninsula = o.priceRub;
+      if (!groups[key].peninsula || o.price < groups[key].peninsula) groups[key].peninsula = o.price;
     } else if (o.agency === 'AKAY') {
-      if (!groups[key].akay || o.priceRub < groups[key].akay) groups[key].akay = o.priceRub;
+      if (!groups[key].akay || o.price < groups[key].akay) groups[key].akay = o.price;
     }
   }
 
@@ -289,9 +286,8 @@ async function main() {
       try {
         const offers = await fetchAndParse(browser, task.url, task.checkIn);
         for (const o of offers) {
-          const dateKey = o.checkInFromUrr || task.checkIn;
-          if (!offersByDate[dateKey]) offersByDate[dateKey] = [];
-          offersByDate[dateKey].push(o);
+          if (!offersByDate[task.checkIn]) offersByDate[task.checkIn] = [];
+          offersByDate[task.checkIn].push(o);
         }
       } catch (e) {
         errors++;
