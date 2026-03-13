@@ -1,6 +1,6 @@
 const fs = require('fs');
 const https = require('https');
-const { parse } = require('node-html-parser');
+const puppeteer = require('puppeteer');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -15,110 +15,81 @@ const AGENCY_RULES = [
   { pattern: '103816',    name: 'AKAY' },
 ];
 
-// ─── HTTP GET ────────────────────────────────────────────────────────────────
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-      },
-      timeout: 30000,
-    }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return httpGet(res.headers.location).then(resolve).catch(reject);
-      }
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-      res.on('error', reject);
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-  });
-}
-
-// ─── Retry wrapper ───────────────────────────────────────────────────────────
-async function fetchWithRetry(url, retries = RETRY_COUNT) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await httpGet(url);
-    } catch (e) {
-      if (i < retries - 1) {
-        console.log(`  [RETRY ${i+1}] ${e.message}`);
-        await sleep(RETRY_DELAY_MS);
-      } else {
-        throw e;
-      }
-    }
-  }
-}
-
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── Agency tanımlama ────────────────────────────────────────────────────────
-function identifyAgency(urrValue) {
-  if (!urrValue) return null;
-  for (const rule of AGENCY_RULES) {
-    if (urrValue.includes(rule.pattern)) return rule.name;
-  }
-  return null;
-}
+// ─── Puppeteer ile sayfa çek ve parse et ─────────────────────────────────────
+async function fetchAndParse(browser, url, checkIn) {
+  const page = await browser.newPage();
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+  await page.setViewport({ width: 1920, height: 1080 });
 
-// ─── HTML parse ──────────────────────────────────────────────────────────────
-// Orijinal C# / HtmlAgilityPack mantığı:
-//   //div[@class='b-pr']          → otel blokları
-//   .//li[@class='s8 i_t1']       → ajans linkleri; urr attribute içinde agency ID var
-//   .//td[@class='c_pe']          → fiyat hücresi
-//   &data=([^&]*)                 → urr'den checkIn tarihi
-//   103810219 → PENINSULA, 103816 → AKAY
-function parseOffers(html) {
-  const offers = [];
-  const root = parse(html);
+  try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }); } catch(e) {}
+  try { await page.waitForSelector('div.b-pr', { timeout: 30000 }); } catch(e) {}
+  await sleep(2000);
 
-  // Her otel bloğu: div.b-pr
-  const hotelBlocks = root.querySelectorAll('div.b-pr');
+  const agencyRulesStr = JSON.stringify(AGENCY_RULES);
 
-  for (const block of hotelBlocks) {
-    // Otel adı: ilk anlamlı link ya da başlık
+  const offers = await page.evaluate((agencyRulesStr, targetDate) => {
+    const agencyRules = JSON.parse(agencyRulesStr);
+
+    function identifyAgency(urr) {
+      for (const rule of agencyRules) {
+        if (urr.includes(rule.pattern)) return rule.name;
+      }
+      return null;
+    }
+
     let hotelName = '';
-    const nameEl = block.querySelector('.b-h') || block.querySelector('h2') || block.querySelector('h3');
-    if (nameEl) hotelName = nameEl.text.trim();
-    if (!hotelName) {
-      const anchor = block.querySelector('a');
-      if (anchor) hotelName = anchor.text.trim();
+    const hotelLink = document.querySelector('a[href*="action=shw"]');
+    if (hotelLink) hotelName = hotelLink.textContent.trim();
+
+    const offers = [];
+    const blocks = document.querySelectorAll('div.b-pr');
+
+    for (const block of blocks) {
+      const allRows = block.querySelectorAll('tr');
+
+      for (const tr of allRows) {
+        const allLis = tr.querySelectorAll('li.s8.i_t1');
+        if (allLis.length === 0) continue;
+
+        let chosenLi = allLis[0];
+        if (targetDate) {
+          for (const li of allLis) {
+            if ((li.getAttribute('urr') || '').includes(targetDate)) {
+              chosenLi = li;
+              break;
+            }
+          }
+        }
+
+        const urr = chosenLi.getAttribute('urr') || '';
+        const agency = identifyAgency(urr);
+        if (!agency) continue;
+
+        let priceRub = null;
+        const bR = tr.querySelector('b.r');
+        if (bR) priceRub = parseInt(bR.textContent.replace(/\D/g, ''), 10) || null;
+        if (!priceRub) {
+          const pe = tr.querySelector('td.c_pe b');
+          if (pe) priceRub = parseInt(pe.textContent.replace(/\D/g, ''), 10) || null;
+        }
+        if (!priceRub) continue;
+
+        const roomTd = tr.querySelector('td.c_ns');
+        const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
+
+        const dateMatch = urr.match(/[&?]data=([^&]+)/);
+        const checkInFromUrr = dateMatch ? decodeURIComponent(dateMatch[1]) : null;
+
+        offers.push({ agency, hotelName, roomType, priceRub, checkInFromUrr });
+      }
     }
-    if (!hotelName) continue;
 
-    // Ajans satırları: li.s8.i_t1
-    const liElements = block.querySelectorAll('li.s8.i_t1');
+    return offers;
+  }, agencyRulesStr, checkIn);
 
-    for (const li of liElements) {
-      // urr attribute'undan agency ID ve tarih çek
-      const urrValue = li.getAttribute('urr') || '';
-      const agency = identifyAgency(urrValue);
-      if (!agency) continue;
-
-      // Fiyat: td.c_pe içindeki <b>
-      const priceTd = li.querySelector('td.c_pe');
-      if (!priceTd) continue;
-      const priceText = priceTd.querySelector('b')?.text || priceTd.text;
-      const priceRub = parseInt(priceText.replace(/\D/g, ''), 10);
-      if (!priceRub || isNaN(priceRub)) continue;
-
-      // Oda tipi: td.c_ns
-      const roomTd = li.querySelector('td.c_ns');
-      const roomType = roomTd ? roomTd.text.trim().split('\n')[0].trim() : 'UNKNOWN';
-
-      // urr içinden checkIn: &data=DD.MM.YYYY
-      const dateMatch = urrValue.match(/[&?]data=([^&]+)/);
-      const checkInFromUrr = dateMatch ? decodeURIComponent(dateMatch[1]) : null;
-
-      offers.push({ agency, hotelName, roomType, priceRub, checkInFromUrr });
-    }
-  }
-
+  await page.close();
   return offers;
 }
 
@@ -133,7 +104,6 @@ function generateDates() {
   const firstDate = new Date(now);
   firstDate.setDate(firstDate.getDate() + 5);
 
-  // Mart'taysa Nisan'a atla
   if (firstDate.getMonth() === 2) {
     firstDate.setMonth(3);
     firstDate.setDate(15);
@@ -202,15 +172,18 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
     for (const a of g.entries) {
       if (a.type === 'closed') {
         block += `  📅 ${a.checkIn} ✅ AKAY kapandı\n`;
-      } else if (!a.peninsulaPrice) {
-        block += `  📅 ${a.checkIn} 🚨 AKAY girdi\n     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
       } else if (a.akayPrice < a.peninsulaPrice) {
         const fark = (a.peninsulaPrice - a.akayPrice).toLocaleString('tr-TR');
-        block += `  📅 ${a.checkIn} 🚨 AKAY öne geçti\n     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB (Fark: ${fark} RUB)\n`;
+        block += `  📅 ${a.checkIn} 🚨 AKAY girdi (gerideyiz)\n`;
+        block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB (Fark: ${fark} RUB)\n`;
       } else if (a.akayPrice === a.peninsulaPrice) {
-        block += `  📅 ${a.checkIn} 🟡 Fiyatlar eşit\n     📌 Peninsula = AKAY: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `  📅 ${a.checkIn} 🟡 AKAY girdi (fiyatlar eşit)\n`;
+        block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
       } else {
-        block += `  📅 ${a.checkIn} 🆕 Rakip girdi (biz öndeyiz)\n     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `  📅 ${a.checkIn} 🆕 AKAY girdi (öndeyiz)\n`;
+        block += `     📌 Peninsula: ${a.peninsulaPrice.toLocaleString('tr-TR')} RUB\n`;
+        block += `     ⚠️ AKAY: ${a.akayPrice.toLocaleString('tr-TR')} RUB\n`;
       }
     }
     block += `─────────────────\n`;
@@ -296,42 +269,51 @@ async function main() {
   const newState  = { ...prevState };
   const allNew = [], allClosed = [];
 
-  const tasks = [];
-  for (const { checkIn, checkOut } of dates) {
-    for (const hotel of hotels) {
-      tasks.push({ url: buildUrl(hotel, checkIn, checkOut), checkIn, hotel });
-    }
-  }
-  console.log(`Toplam istek: ${tasks.length}`);
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  });
 
-  let done = 0, errors = 0;
-  const offersByDate = {};
-
-  await runConcurrent(tasks.map(task => async () => {
-    try {
-      const html = await fetchWithRetry(task.url);
-      const offers = parseOffers(html);
-
-      for (const o of offers) {
-        const dateKey = o.checkInFromUrr || task.checkIn;
-        if (!offersByDate[dateKey]) offersByDate[dateKey] = [];
-        offersByDate[dateKey].push(o);
+  try {
+    const tasks = [];
+    for (const { checkIn, checkOut } of dates) {
+      for (const hotel of hotels) {
+        tasks.push({ url: buildUrl(hotel, checkIn, checkOut), checkIn, hotel });
       }
-    } catch (e) {
-      errors++;
-      console.log(`  [HATA] ${task.hotel.id} ${task.checkIn}: ${e.message}`);
     }
-    done++;
-    if (done % 50 === 0 || done === tasks.length) {
-      console.log(`  ${done}/${tasks.length} tamamlandi (${errors} hata)`);
-    }
-  }), CONCURRENCY);
+    console.log(`Toplam istek: ${tasks.length}`);
 
-  for (const [checkIn, offers] of Object.entries(offersByDate)) {
-    console.log(`  [${checkIn}] ${offers.length} teklif`);
-    const { newAlerts, closedAlerts } = analyzeOffers(checkIn, offers, prevState, newState);
-    allNew.push(...newAlerts);
-    allClosed.push(...closedAlerts);
+    let done = 0, errors = 0;
+    const offersByDate = {};
+
+    await runConcurrent(tasks.map(task => async () => {
+      try {
+        const offers = await fetchAndParse(browser, task.url, task.checkIn);
+
+        for (const o of offers) {
+          const dateKey = o.checkInFromUrr || task.checkIn;
+          if (!offersByDate[dateKey]) offersByDate[dateKey] = [];
+          offersByDate[dateKey].push(o);
+        }
+      } catch (e) {
+        errors++;
+        console.log(`  [HATA] ${task.hotel.id} ${task.checkIn}: ${e.message}`);
+      }
+      done++;
+      if (done % 50 === 0 || done === tasks.length) {
+        console.log(`  ${done}/${tasks.length} tamamlandi (${errors} hata)`);
+      }
+    }), CONCURRENCY);
+
+    for (const [checkIn, offers] of Object.entries(offersByDate)) {
+      console.log(`  [${checkIn}] ${offers.length} teklif`);
+      const { newAlerts, closedAlerts } = analyzeOffers(checkIn, offers, prevState, newState);
+      allNew.push(...newAlerts);
+      allClosed.push(...closedAlerts);
+    }
+
+  } finally {
+    await browser.close();
   }
 
   saveState(newState);
