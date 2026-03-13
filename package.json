@@ -1,1 +1,10 @@
-{"name": "tek-yetkili-monitor", "version": "1.0.0", "private": true, "dependencies": {"puppeteer": "^23.0.0"}}
+{
+  "name": "tekel-monitor",
+  "version": "1.0.0",
+  "description": "Peninsula Tek Yetkili İhlal Monitörü",
+  "main": "scraper.js",
+  "scripts": {
+    "start": "node scraper.js"
+  },
+  "dependencies": {}
+}
