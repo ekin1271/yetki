@@ -124,7 +124,7 @@ function generateDates() {
 }
 
 function buildUrl(hotel, checkIn, checkOut) {
-  return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000864&id_price=121110211812&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
+  return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
 }
 
 // ─── Telegram ────────────────────────────────────────────────────────────────
