@@ -7,8 +7,6 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const STATE_FILE = 'tekel_state.json';
 const HOTELS_FILE = 'hotels.json';
 const CONCURRENCY = 8;
-const RETRY_COUNT = 3;
-const RETRY_DELAY_MS = 3000;
 
 const AGENCY_RULES = [
   { pattern: '103810219', name: 'PENINSULA' },
@@ -44,46 +42,47 @@ async function fetchAndParse(browser, url, checkIn) {
     if (hotelLink) hotelName = hotelLink.textContent.trim();
 
     const offers = [];
-    const blocks = document.querySelectorAll('div.b-pr');
 
-    for (const block of blocks) {
-      const allRows = block.querySelectorAll('tr');
+    // Sadece ilk div.b-pr — komşu otelleri atla
+    const block = document.querySelector('div.b-pr');
+    if (!block) return offers;
 
-      for (const tr of allRows) {
-        const allLis = tr.querySelectorAll('li.s8.i_t1');
-        if (allLis.length === 0) continue;
+    const allRows = block.querySelectorAll('tr');
 
-        let chosenLi = allLis[0];
-        if (targetDate) {
-          for (const li of allLis) {
-            if ((li.getAttribute('urr') || '').includes(targetDate)) {
-              chosenLi = li;
-              break;
-            }
+    for (const tr of allRows) {
+      const allLis = tr.querySelectorAll('li.s8.i_t1');
+      if (allLis.length === 0) continue;
+
+      let chosenLi = allLis[0];
+      if (targetDate) {
+        for (const li of allLis) {
+          if ((li.getAttribute('urr') || '').includes(targetDate)) {
+            chosenLi = li;
+            break;
           }
         }
-
-        const urr = chosenLi.getAttribute('urr') || '';
-        const agency = identifyAgency(urr);
-        if (!agency) continue;
-
-        let priceRub = null;
-        const bR = tr.querySelector('b.r');
-        if (bR) priceRub = parseInt(bR.textContent.replace(/\D/g, ''), 10) || null;
-        if (!priceRub) {
-          const pe = tr.querySelector('td.c_pe b');
-          if (pe) priceRub = parseInt(pe.textContent.replace(/\D/g, ''), 10) || null;
-        }
-        if (!priceRub) continue;
-
-        const roomTd = tr.querySelector('td.c_ns');
-        const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
-
-        const dateMatch = urr.match(/[&?]data=([^&]+)/);
-        const checkInFromUrr = dateMatch ? decodeURIComponent(dateMatch[1]) : null;
-
-        offers.push({ agency, hotelName, roomType, priceRub, checkInFromUrr });
       }
+
+      const urr = chosenLi.getAttribute('urr') || '';
+      const agency = identifyAgency(urr);
+      if (!agency) continue;
+
+      let priceRub = null;
+      const bR = tr.querySelector('b.r');
+      if (bR) priceRub = parseInt(bR.textContent.replace(/\D/g, ''), 10) || null;
+      if (!priceRub) {
+        const pe = tr.querySelector('td.c_pe b');
+        if (pe) priceRub = parseInt(pe.textContent.replace(/\D/g, ''), 10) || null;
+      }
+      if (!priceRub) continue;
+
+      const roomTd = tr.querySelector('td.c_ns');
+      const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
+
+      const dateMatch = urr.match(/[&?]data=([^&]+)/);
+      const checkInFromUrr = dateMatch ? decodeURIComponent(dateMatch[1]) : null;
+
+      offers.push({ agency, hotelName, roomType, priceRub, checkInFromUrr });
     }
 
     return offers;
@@ -289,7 +288,6 @@ async function main() {
     await runConcurrent(tasks.map(task => async () => {
       try {
         const offers = await fetchAndParse(browser, task.url, task.checkIn);
-
         for (const o of offers) {
           const dateKey = o.checkInFromUrr || task.checkIn;
           if (!offersByDate[dateKey]) offersByDate[dateKey] = [];
