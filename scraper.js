@@ -200,7 +200,7 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
   }
 
   const time = `\n🕐 ${new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' })}`;
-  let current = '🔍 <b>Tekel İhlali Raporu</b>\n\n';
+  let current = '🔍 <b>Tek Yetkili İhlal Raporu</b>\n\n';
 
   for (const g of Object.values(groups)) {
     let block = `🏨 <b>${g.hotel}</b>\n🛏 ${g.room}\n`;
@@ -225,7 +225,7 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
 
     if ((current + block).length > 3500) {
       await sendTelegram(current);
-      current = '🔍 <b>Tekel İhlali Raporu (devam)</b>\n\n' + block;
+      current = '🔍 <b>Tek Yetkili İhlal Raporu (devam)</b>\n\n' + block;
     } else {
       current += block;
     }
@@ -362,6 +362,6 @@ async function main() {
 
 main().catch(async err => {
   console.error('Kritik hata:', err.message);
-  await sendTelegram(`❌ <b>Tekel Monitor Hatası</b>\n\n${err.message}`).catch(() => {});
+  await sendTelegram(`❌ <b>Tek Yetkili Monitor Hatası</b>\n\n${err.message}`).catch(() => {});
   process.exit(1);
 });
