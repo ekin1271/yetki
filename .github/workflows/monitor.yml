@@ -1,7 +1,7 @@
 name: Monitor
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/45 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -31,11 +31,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
+          GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
         run: node scraper.js
 
-      - name: State dosyasını kaydet
+      - name: State dosyasını kaydet ve push et
         run: |
           git fetch origin
           git add tekel_state.json
           git diff --staged --quiet || git commit -m "state güncellendi"
-          git push origin main || (git pull origin main --rebase && git push origin main)
+          git push origin main || (git pull origin main --rebase -X ours && git push origin main)
