@@ -4,13 +4,16 @@ const puppeteer = require('puppeteer');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_GROUP_ID = process.env.GROUP_CHAT_ID;
 const STATE_FILE = 'tekel_state.json';
 const HOTELS_FILE = 'hotels.json';
 const CONCURRENCY = 8;
 
 const AGENCY_RULES = [
-  { pattern: '103810219', name: 'PENINSULA' },
-  { pattern: '103816',    name: 'AKAY' },
+  { pattern: '103810219',   name: 'PENINSULA' }, // Antalya
+  { pattern: '103810221461', name: 'PENINSULA' }, // Bodrum
+  { pattern: '103810221462', name: 'PENINSULA' }, // Bodrum
+  { pattern: '103816',      name: 'AKAY' },
 ];
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -158,17 +161,22 @@ function buildUrl(hotel, checkIn, checkOut) {
 // ─── Telegram ────────────────────────────────────────────────────────────────
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) { console.log('[TEL]', text.slice(0, 100)); return; }
-  const body = JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML', disable_web_page_preview: true });
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  await new Promise((resolve, reject) => {
-    const req = https.request(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    }, (res) => { res.resume(); res.on('end', resolve); });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+  const targets = [TELEGRAM_CHAT_ID];
+  if (TELEGRAM_GROUP_ID) targets.push(TELEGRAM_GROUP_ID);
+
+  for (const chatId of targets) {
+    const body = JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true });
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    await new Promise((resolve, reject) => {
+      const req = https.request(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => { res.resume(); res.on('end', resolve); });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  }
 }
 
 async function sendTelegramSplit(newAlerts, closedAlerts) {
