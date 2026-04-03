@@ -40,10 +40,6 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       return null;
     }
 
-    let hotelName = '';
-    const hotelLink = document.querySelector('a[href*="action=shw"]');
-    if (hotelLink) hotelName = hotelLink.textContent.trim();
-
     const offers = [];
 
     // Sadece ilk div.b-pr — komşu otelleri atla
@@ -58,6 +54,11 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
         if (dataHid && dataHid !== expectedHotelId) return offers;
       }
     }
+
+    // Otel adı: b-pr içindeki ilk "code=" içeren linkin text'i
+    let hotelName = '';
+    const hotelLink = block.querySelector('a[href*="code="]');
+    if (hotelLink) hotelName = hotelLink.textContent.trim();
 
     const allRows = block.querySelectorAll('tr');
 
