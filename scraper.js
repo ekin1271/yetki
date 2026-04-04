@@ -18,7 +18,6 @@ const AGENCY_RULES = [
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── Puppeteer ile sayfa çek ve parse et ─────────────────────────────────────
 async function fetchAndParse(browser, url, checkIn, hotelId) {
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -40,13 +39,24 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       return null;
     }
 
-    const offers = [];
+    // EUR fiyatını td.c_pe içindeki a[title] attribute'undan al
+    // title="1591 EUR" formatında
+    function extractEurPrice(tr) {
+      const priceTd = tr.querySelector('td.c_pe');
+      if (!priceTd) return null;
+      const links = priceTd.querySelectorAll('a[title]');
+      for (const a of links) {
+        const title = a.getAttribute('title') || '';
+        const m = title.match(/(\d+)\s*EUR/i);
+        if (m) return parseInt(m[1], 10);
+      }
+      return null;
+    }
 
-    // Sadece ilk div.b-pr — komşu otelleri atla
+    const offers = [];
     const block = document.querySelector('div.b-pr');
     if (!block) return offers;
 
-    // data-hid kontrolü: sayfadaki otel ID'si beklenenle eşleşmiyorsa geç
     if (expectedHotelId) {
       const nameDiv = block.querySelector('div.name[data-hid]');
       if (nameDiv) {
@@ -55,24 +65,17 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       }
     }
 
-    // Otel adı: b-pr içinde değil, üstündeki c_hl hücresinde.
-    // Yapı: table.b-pr-t > tbody > tr.b-pr-t_hl > th.c_hl > div.c_hl_w > div.name > a
-    // b-pr -> closest table -> c_hl içindeki link
+    // Otel adı: closest table'daki header linkinden
     let hotelName = '';
     const parentTable = block.closest('table');
     if (parentTable) {
-      // Otel adı linki: href içinde "code=" ve "action=shw" geçen a
       const nameLink = parentTable.querySelector('a[href*="code="][href*="action=shw"]');
-      if (nameLink) {
-        hotelName = nameLink.textContent.trim();
-      }
-      // Fallback: div.name içindeki ilk a
+      if (nameLink) hotelName = nameLink.textContent.trim();
       if (!hotelName) {
         const divName = parentTable.querySelector('div.name a');
         if (divName) hotelName = divName.textContent.trim();
       }
     }
-    // Son fallback: page-level
     if (!hotelName) {
       const pageLink = document.querySelector('a[href*="code="][href*="action=shw"]');
       if (pageLink) hotelName = pageLink.textContent.trim();
@@ -98,12 +101,7 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       const agency = identifyAgency(urr);
       if (!agency) continue;
 
-      let price = null;
-      const priceLink = tr.querySelector('td.c_pe a[href*="x="]');
-      if (priceLink) {
-        const m = (priceLink.getAttribute('href') || '').match(/[?&]x=(\d+)/);
-        if (m) price = parseInt(m[1], 10) || null;
-      }
+      const price = extractEurPrice(tr);
       if (!price) continue;
 
       const roomTd = tr.querySelector('td.c_ns');
@@ -119,12 +117,10 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
   return offers;
 }
 
-// ─── Date shift wrapper ──────────────────────────────────────────────────────
 async function fetchAndParseWithDateShift(browser, url, checkIn, hotelId) {
   const offers = await fetchAndParse(browser, url, checkIn, hotelId);
   if (offers.length > 0) return { offers, usedCheckIn: checkIn };
 
-  // Boş sayfa — +5 gün dene
   const [d, m, y] = checkIn.split('.');
   const date = new Date(y, m - 1, d);
   date.setDate(date.getDate() + 5);
@@ -141,7 +137,6 @@ async function fetchAndParseWithDateShift(browser, url, checkIn, hotelId) {
   return { offers: offers2, usedCheckIn: newCheckIn };
 }
 
-// ─── Otel listesi & URL üretimi ──────────────────────────────────────────────
 function loadHotels() {
   return JSON.parse(fs.readFileSync(HOTELS_FILE, 'utf8'));
 }
@@ -177,7 +172,6 @@ function buildUrl(hotel, checkIn, checkOut) {
   return `https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=${idPrice}&data=${checkIn}&d2=${checkOut}&f7=7&f3=&f8=&ho=0&F4=${hotel.id}&ins=0-40000-EUR&flt=100411293179&p=${hotel.p}`;
 }
 
-// ─── Telegram ────────────────────────────────────────────────────────────────
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) { console.log('[TEL]', text.slice(0, 100)); return; }
   const targets = [TELEGRAM_CHAT_ID];
@@ -252,7 +246,6 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
   await sendTelegram(current + time);
 }
 
-// ─── State ───────────────────────────────────────────────────────────────────
 function loadState() {
   if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   return {};
@@ -262,7 +255,6 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
 }
 
-// ─── Analiz ──────────────────────────────────────────────────────────────────
 function analyzeOffers(checkIn, offers, prevState, newState) {
   const newAlerts = [], closedAlerts = [];
   const groups = {};
@@ -303,7 +295,6 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
   return { newAlerts, closedAlerts };
 }
 
-// ─── Concurrency helper ──────────────────────────────────────────────────────
 async function runConcurrent(tasks, concurrency) {
   for (let i = 0; i < tasks.length; i += concurrency) {
     const batch = tasks.slice(i, i + concurrency);
@@ -312,7 +303,6 @@ async function runConcurrent(tasks, concurrency) {
   }
 }
 
-// ─── MAIN ────────────────────────────────────────────────────────────────────
 async function main() {
   console.log('Tarama basliyor...');
   const hotels = loadHotels();
