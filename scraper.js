@@ -39,17 +39,17 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       return null;
     }
 
-    // EUR fiyatını çoklu stratejilerle çek
+    // EUR fiyatını çek — x= her zaman EUR, b.r ruble olabilir, ona bakma
     function extractEurPrice(tr) {
       const priceTd = tr.querySelector('td.c_pe');
       if (!priceTd) return null;
 
-      // Strateji 1: <b class="r"> içindeki sayı (yeni format)
-      const boldR = priceTd.querySelector('b.r, b');
-      if (boldR) {
-        const raw = boldR.textContent.trim().replace(/[^\d]/g, '');
-        const p = parseInt(raw, 10);
-        if (p > 0) return p;
+      // Strateji 1: link URL'sinde x= parametresi (EUR, kesin doğru)
+      const anyLink = priceTd.querySelector('a[href]');
+      if (anyLink) {
+        const href = anyLink.getAttribute('href') || '';
+        const mX = href.match(/[?&]x=(\d+)/);
+        if (mX) return parseInt(mX[1], 10);
       }
 
       // Strateji 2: a[title] içinde "1591 EUR" formatı
@@ -58,16 +58,6 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
         const title = a.getAttribute('title') || '';
         const m = title.match(/(\d+)\s*EUR/i);
         if (m) return parseInt(m[1], 10);
-      }
-
-      // Strateji 3: link URL'sinde otv= veya x= parametresi
-      const anyLink = priceTd.querySelector('a[href]');
-      if (anyLink) {
-        const href = anyLink.getAttribute('href') || '';
-        const mOtv = href.match(/[?&]otv=(\d+)/);
-        const mX   = href.match(/[?&]x=(\d+)/);
-        if (mOtv) return parseInt(mOtv[1], 10);
-        if (mX)   return parseInt(mX[1], 10);
       }
 
       return null;
