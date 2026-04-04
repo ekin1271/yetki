@@ -10,10 +10,10 @@ const HOTELS_FILE = 'hotels.json';
 const CONCURRENCY = 8;
 
 const AGENCY_RULES = [
-  { pattern: '103810219',   name: 'PENINSULA' }, // Antalya
+  { pattern: '103810219',    name: 'PENINSULA' }, // Antalya
   { pattern: '103810221461', name: 'PENINSULA' }, // Bodrum
   { pattern: '103810221462', name: 'PENINSULA' }, // Bodrum
-  { pattern: '103816',      name: 'AKAY' },
+  { pattern: '103816',       name: 'AKAY' },
 ];
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -29,7 +29,7 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
 
   const agencyRulesStr = JSON.stringify(AGENCY_RULES);
 
-  const offers = await page.evaluate((agencyRulesStr, targetDate, expectedHotelId) => {
+  const offers = await page.evaluate((agencyRulesStr, targetDate, fallbackHotelId) => {
     const agencyRules = JSON.parse(agencyRulesStr);
 
     function identifyAgency(urr) {
@@ -39,75 +39,86 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       return null;
     }
 
-    // EUR fiyatını td.c_pe içindeki a[title] attribute'undan al
-    // title="1591 EUR" formatında
+    // EUR fiyatını çoklu stratejilerle çek
     function extractEurPrice(tr) {
       const priceTd = tr.querySelector('td.c_pe');
       if (!priceTd) return null;
+
+      // Strateji 1: <b class="r"> içindeki sayı (yeni format)
+      const boldR = priceTd.querySelector('b.r, b');
+      if (boldR) {
+        const raw = boldR.textContent.trim().replace(/[^\d]/g, '');
+        const p = parseInt(raw, 10);
+        if (p > 0) return p;
+      }
+
+      // Strateji 2: a[title] içinde "1591 EUR" formatı
       const links = priceTd.querySelectorAll('a[title]');
       for (const a of links) {
         const title = a.getAttribute('title') || '';
         const m = title.match(/(\d+)\s*EUR/i);
         if (m) return parseInt(m[1], 10);
       }
+
+      // Strateji 3: link URL'sinde otv= veya x= parametresi
+      const anyLink = priceTd.querySelector('a[href]');
+      if (anyLink) {
+        const href = anyLink.getAttribute('href') || '';
+        const mOtv = href.match(/[?&]otv=(\d+)/);
+        const mX   = href.match(/[?&]x=(\d+)/);
+        if (mOtv) return parseInt(mOtv[1], 10);
+        if (mX)   return parseInt(mX[1], 10);
+      }
+
       return null;
     }
 
     const offers = [];
-    const block = document.querySelector('div.b-pr');
-    if (!block) return offers;
 
-    if (expectedHotelId) {
-      const nameDiv = block.querySelector('div.name[data-hid]');
+    // KRİTİK DÜZELTME: querySelectorAll ile TÜM b-pr bloklarını işle
+    const blocks = document.querySelectorAll('div.b-pr');
+
+    for (const block of blocks) {
+      // Otel adı: önce div.name > a, sonra fallback
+      let hotelName = '';
+      const nameDiv = block.querySelector('div.name a');
       if (nameDiv) {
-        const dataHid = nameDiv.getAttribute('data-hid');
-        if (dataHid && dataHid !== expectedHotelId) return offers;
+        hotelName = nameDiv.textContent.trim();
+      } else {
+        const nameLink = block.querySelector('a[href*="code="][href*="action=shw"]');
+        if (nameLink) hotelName = nameLink.textContent.trim();
       }
-    }
+      if (!hotelName) hotelName = `hotel_${fallbackHotelId}`;
 
-    // Otel adı: closest table'daki header linkinden
-    let hotelName = '';
-    const parentTable = block.closest('table');
-    if (parentTable) {
-      const nameLink = parentTable.querySelector('a[href*="code="][href*="action=shw"]');
-      if (nameLink) hotelName = nameLink.textContent.trim();
-      if (!hotelName) {
-        const divName = parentTable.querySelector('div.name a');
-        if (divName) hotelName = divName.textContent.trim();
-      }
-    }
-    if (!hotelName) {
-      const pageLink = document.querySelector('a[href*="code="][href*="action=shw"]');
-      if (pageLink) hotelName = pageLink.textContent.trim();
-    }
+      const allRows = block.querySelectorAll('tr');
 
-    const allRows = block.querySelectorAll('tr');
+      for (const tr of allRows) {
+        const allLis = tr.querySelectorAll('li.s8.i_t1');
+        if (allLis.length === 0) continue;
 
-    for (const tr of allRows) {
-      const allLis = tr.querySelectorAll('li.s8.i_t1');
-      if (allLis.length === 0) continue;
-
-      let chosenLi = allLis[0];
-      if (targetDate) {
-        for (const li of allLis) {
-          if ((li.getAttribute('urr') || '').includes(targetDate)) {
-            chosenLi = li;
-            break;
+        // Hedef tarihe uygun li'yi seç
+        let chosenLi = allLis[0];
+        if (targetDate) {
+          for (const li of allLis) {
+            if ((li.getAttribute('urr') || '').includes(targetDate)) {
+              chosenLi = li;
+              break;
+            }
           }
         }
+
+        const urr = chosenLi.getAttribute('urr') || '';
+        const agency = identifyAgency(urr);
+        if (!agency) continue;
+
+        const price = extractEurPrice(tr);
+        if (!price) continue;
+
+        const roomTd = tr.querySelector('td.c_ns');
+        const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
+
+        offers.push({ agency, hotelName, roomType, price });
       }
-
-      const urr = chosenLi.getAttribute('urr') || '';
-      const agency = identifyAgency(urr);
-      if (!agency) continue;
-
-      const price = extractEurPrice(tr);
-      if (!price) continue;
-
-      const roomTd = tr.querySelector('td.c_ns');
-      const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
-
-      offers.push({ agency, hotelName, roomType, price });
     }
 
     return offers;
@@ -270,7 +281,7 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
   }
 
   for (const [key, data] of Object.entries(groups)) {
-    if (!data.peninsula) continue;
+    if (!data.peninsula) continue; // Peninsula yoksa bu otel bizim portföyde değil, atla
     const prev = prevState[key];
 
     if (!data.akay) {
@@ -333,9 +344,9 @@ async function main() {
     await runConcurrent(tasks.map(task => async () => {
       try {
         const { offers, usedCheckIn } = await fetchAndParseWithDateShift(browser, task.url, task.checkIn, task.hotel.id);
-        for (const o of offers) {
+        if (offers.length > 0) {
           if (!offersByDate[usedCheckIn]) offersByDate[usedCheckIn] = [];
-          offersByDate[usedCheckIn].push(o);
+          offersByDate[usedCheckIn].push(...offers);
         }
       } catch (e) {
         errors++;
@@ -348,7 +359,7 @@ async function main() {
     }), CONCURRENCY);
 
     for (const [checkIn, offers] of Object.entries(offersByDate)) {
-      console.log(`  [${checkIn}] ${offers.length} teklif`);
+      console.log(`  [${checkIn}] ${offers.length} teklif (Peninsula: ${offers.filter(o=>o.agency==='PENINSULA').length}, AKAY: ${offers.filter(o=>o.agency==='AKAY').length})`);
       const { newAlerts, closedAlerts } = analyzeOffers(checkIn, offers, prevState, newState);
       allNew.push(...newAlerts);
       allClosed.push(...closedAlerts);
