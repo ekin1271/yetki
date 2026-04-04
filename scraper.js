@@ -55,10 +55,28 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
       }
     }
 
-    // Otel adı: b-pr içindeki ilk "code=" içeren linkin text'i
+    // Otel adı: b-pr içinde değil, üstündeki c_hl hücresinde.
+    // Yapı: table.b-pr-t > tbody > tr.b-pr-t_hl > th.c_hl > div.c_hl_w > div.name > a
+    // b-pr -> closest table -> c_hl içindeki link
     let hotelName = '';
-    const hotelLink = block.querySelector('a[href*="code="]');
-    if (hotelLink) hotelName = hotelLink.textContent.trim();
+    const parentTable = block.closest('table');
+    if (parentTable) {
+      // Otel adı linki: href içinde "code=" ve "action=shw" geçen a
+      const nameLink = parentTable.querySelector('a[href*="code="][href*="action=shw"]');
+      if (nameLink) {
+        hotelName = nameLink.textContent.trim();
+      }
+      // Fallback: div.name içindeki ilk a
+      if (!hotelName) {
+        const divName = parentTable.querySelector('div.name a');
+        if (divName) hotelName = divName.textContent.trim();
+      }
+    }
+    // Son fallback: page-level
+    if (!hotelName) {
+      const pageLink = document.querySelector('a[href*="code="][href*="action=shw"]');
+      if (pageLink) hotelName = pageLink.textContent.trim();
+    }
 
     const allRows = block.querySelectorAll('tr');
 
