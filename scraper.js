@@ -7,16 +7,80 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TELEGRAM_GROUP_ID = process.env.GROUP_CHAT_ID;
 const STATE_FILE = 'tekel_state.json';
 const HOTELS_FILE = 'hotels.json';
-const CONCURRENCY = 8;
+const CONCURRENCY = 5;
 
-const AGENCY_RULES = [
-  { pattern: '103810219',    name: 'PENINSULA' }, // Antalya
-  { pattern: '103810221461', name: 'PENINSULA' }, // Bodrum
-  { pattern: '103810221462', name: 'PENINSULA' }, // Bodrum
-  { pattern: '103816',       name: 'AKAY' },
-];
+const PENINSULA_PATTERNS = ['103810219', '103810221461', '103810221462'];
+const AKAY_PATTERN = '103816';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─── Ham HTML'den regex ile parse — DOM'a güvenmiyoruz ──────────────────────
+function parseHtml(html, targetDate, fallbackHotelId) {
+  const offers = [];
+
+  // Otel adı
+  const nameMatch = html.match(/class="name"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/);
+  let hotelName = nameMatch ? nameMatch[1].trim() : `hotel_${fallbackHotelId}`;
+
+  // <tr>...</tr> bloklarını bul — collapsed satırlar dahil ham HTML'de mevcut
+  const trRegex = /<tr[\s\S]*?<\/tr>/gi;
+  let trMatch;
+
+  while ((trMatch = trRegex.exec(html)) !== null) {
+    const trHtml = trMatch[0];
+
+    if (!trHtml.includes('s8 i_t1') && !trHtml.includes('s8 i_ft')) continue;
+
+    // Tüm li'lerin urr attribute'larını topla
+    const liRegex = /urr="([^"]+)"/g;
+    let liMatch;
+    const urrList = [];
+    while ((liMatch = liRegex.exec(trHtml)) !== null) {
+      urrList.push(liMatch[1]);
+    }
+    if (urrList.length === 0) continue;
+
+    // Hedef tarihe uyan urr'u seç
+    let chosenUrr = urrList[0];
+    if (targetDate) {
+      for (const u of urrList) {
+        if (u.includes(targetDate)) { chosenUrr = u; break; }
+      }
+    }
+
+    // Ajans
+    let agency = null;
+    if (PENINSULA_PATTERNS.some(p => chosenUrr.includes(p))) agency = 'PENINSULA';
+    else if (chosenUrr.includes(AKAY_PATTERN)) agency = 'AKAY';
+    if (!agency) continue;
+
+    // Fiyat: td.c_pe içindeki a href'inden x= (EUR)
+    const cpeTdMatch = trHtml.match(/class="c_pe"[\s\S]*?<\/td>/);
+    if (!cpeTdMatch) continue;
+    const cpeTd = cpeTdMatch[0];
+
+    let price = 0;
+    const xMatch = cpeTd.match(/[?&]x=(\d+)/);
+    if (xMatch) price = parseInt(xMatch[1], 10);
+
+    if (!price) {
+      const titleMatch = cpeTd.match(/title="(\d+)\s*EUR"/i);
+      if (titleMatch) price = parseInt(titleMatch[1], 10);
+    }
+    if (!price) continue;
+
+    // Oda tipi
+    const roomMatch = trHtml.match(/class="c_ns[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+    let roomType = 'UNKNOWN';
+    if (roomMatch) {
+      roomType = roomMatch[1].replace(/<[^>]+>/g, '').trim().split('\n')[0].trim();
+    }
+
+    offers.push({ agency, hotelName, roomType, price });
+  }
+
+  return offers;
+}
 
 async function fetchAndParse(browser, url, checkIn, hotelId) {
   const page = await browser.newPage();
@@ -25,101 +89,17 @@ async function fetchAndParse(browser, url, checkIn, hotelId) {
 
   try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }); } catch(e) {}
   try { await page.waitForSelector('div.b-pr', { timeout: 30000 }); } catch(e) {}
-  await sleep(2000);
+  await sleep(3000);
 
-  const agencyRulesStr = JSON.stringify(AGENCY_RULES);
-
-  const offers = await page.evaluate((agencyRulesStr, targetDate, fallbackHotelId) => {
-    const agencyRules = JSON.parse(agencyRulesStr);
-
-    function identifyAgency(urr) {
-      for (const rule of agencyRules) {
-        if (urr.includes(rule.pattern)) return rule.name;
-      }
-      return null;
-    }
-
-    // EUR fiyatını çek — x= her zaman EUR, b.r ruble olabilir, ona bakma
-    function extractEurPrice(tr) {
-      const priceTd = tr.querySelector('td.c_pe');
-      if (!priceTd) return null;
-
-      // Strateji 1: link URL'sinde x= parametresi (EUR, kesin doğru)
-      const anyLink = priceTd.querySelector('a[href]');
-      if (anyLink) {
-        const href = anyLink.getAttribute('href') || '';
-        const mX = href.match(/[?&]x=(\d+)/);
-        if (mX) return parseInt(mX[1], 10);
-      }
-
-      // Strateji 2: a[title] içinde "1591 EUR" formatı
-      const links = priceTd.querySelectorAll('a[title]');
-      for (const a of links) {
-        const title = a.getAttribute('title') || '';
-        const m = title.match(/(\d+)\s*EUR/i);
-        if (m) return parseInt(m[1], 10);
-      }
-
-      return null;
-    }
-
-    const offers = [];
-
-    // KRİTİK DÜZELTME: querySelectorAll ile TÜM b-pr bloklarını işle
-    const blocks = document.querySelectorAll('div.b-pr');
-
-    for (const block of blocks) {
-      // Otel adı: önce div.name > a, sonra fallback
-      let hotelName = '';
-      const nameDiv = block.querySelector('div.name a');
-      if (nameDiv) {
-        hotelName = nameDiv.textContent.trim();
-      } else {
-        const nameLink = block.querySelector('a[href*="code="][href*="action=shw"]');
-        if (nameLink) hotelName = nameLink.textContent.trim();
-      }
-      if (!hotelName) hotelName = `hotel_${fallbackHotelId}`;
-
-      const allRows = block.querySelectorAll('tr');
-
-      for (const tr of allRows) {
-        const allLis = tr.querySelectorAll('li.s8.i_t1');
-        if (allLis.length === 0) continue;
-
-        // Hedef tarihe uygun li'yi seç
-        let chosenLi = allLis[0];
-        if (targetDate) {
-          for (const li of allLis) {
-            if ((li.getAttribute('urr') || '').includes(targetDate)) {
-              chosenLi = li;
-              break;
-            }
-          }
-        }
-
-        const urr = chosenLi.getAttribute('urr') || '';
-        const agency = identifyAgency(urr);
-        if (!agency) continue;
-
-        const price = extractEurPrice(tr);
-        if (!price) continue;
-
-        const roomTd = tr.querySelector('td.c_ns');
-        const roomType = roomTd ? roomTd.textContent.trim().split('\n')[0].trim() : 'UNKNOWN';
-
-        offers.push({ agency, hotelName, roomType, price });
-      }
-    }
-
-    return offers;
-  }, agencyRulesStr, checkIn, hotelId);
-
+  const html = await page.content();
   await page.close();
-  return offers;
+
+  if (!html.includes('b-pr')) return [];
+  return parseHtml(html, checkIn, hotelId);
 }
 
 async function fetchAndParseWithDateShift(browser, url, checkIn, hotelId) {
-  const offers = await fetchAndParse(browser, url, checkIn, hotelId);
+  let offers = await fetchAndParse(browser, url, checkIn, hotelId);
   if (offers.length > 0) return { offers, usedCheckIn: checkIn };
 
   const [d, m, y] = checkIn.split('.');
@@ -134,8 +114,8 @@ async function fetchAndParseWithDateShift(browser, url, checkIn, hotelId) {
     .replace(/data=\d{2}\.\d{2}\.\d{4}/, `data=${newCheckIn}`)
     .replace(/d2=\d{2}\.\d{2}\.\d{4}/,   `d2=${newCheckOut}`);
 
-  const offers2 = await fetchAndParse(browser, newUrl, newCheckIn, hotelId);
-  return { offers: offers2, usedCheckIn: newCheckIn };
+  offers = await fetchAndParse(browser, newUrl, newCheckIn, hotelId);
+  return { offers, usedCheckIn: newCheckIn };
 }
 
 function loadHotels() {
@@ -271,7 +251,7 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
   }
 
   for (const [key, data] of Object.entries(groups)) {
-    if (!data.peninsula) continue; // Peninsula yoksa bu otel bizim portföyde değil, atla
+    if (!data.peninsula) continue;
     const prev = prevState[key];
 
     if (!data.akay) {
@@ -343,13 +323,15 @@ async function main() {
         console.log(`  [HATA] ${task.hotel.id} ${task.checkIn}: ${e.message}`);
       }
       done++;
-      if (done % 50 === 0 || done === tasks.length) {
+      if (done % 20 === 0 || done === tasks.length) {
         console.log(`  ${done}/${tasks.length} tamamlandi (${errors} hata)`);
       }
     }), CONCURRENCY);
 
     for (const [checkIn, offers] of Object.entries(offersByDate)) {
-      console.log(`  [${checkIn}] ${offers.length} teklif (Peninsula: ${offers.filter(o=>o.agency==='PENINSULA').length}, AKAY: ${offers.filter(o=>o.agency==='AKAY').length})`);
+      const pen = offers.filter(o => o.agency === 'PENINSULA').length;
+      const akay = offers.filter(o => o.agency === 'AKAY').length;
+      console.log(`  [${checkIn}] ${offers.length} teklif — Peninsula: ${pen}, AKAY: ${akay}`);
       const { newAlerts, closedAlerts } = analyzeOffers(checkIn, offers, prevState, newState);
       allNew.push(...newAlerts);
       allClosed.push(...closedAlerts);
