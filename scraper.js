@@ -14,7 +14,7 @@ const AKAY_PATTERN = '103816';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── Ham HTML'den regex ile parse — DOM'a güvenmiyoruz ──────────────────────
+// ─── Ham HTML'den regex parse ────────────────────────────────────────────────
 function parseHtml(html, targetDate, fallbackHotelId) {
   const offers = [];
 
@@ -22,25 +22,25 @@ function parseHtml(html, targetDate, fallbackHotelId) {
   const nameMatch = html.match(/class="name"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/);
   let hotelName = nameMatch ? nameMatch[1].trim() : `hotel_${fallbackHotelId}`;
 
-  // <tr>...</tr> bloklarını bul — collapsed satırlar dahil ham HTML'de mevcut
+  // <tr>...</tr> bloklarını bul
   const trRegex = /<tr[\s\S]*?<\/tr>/gi;
   let trMatch;
 
   while ((trMatch = trRegex.exec(html)) !== null) {
     const trHtml = trMatch[0];
+    if (!trHtml.includes('s8 i_t1')) continue; // Sadece i_t1 olan satırlar
 
-    if (!trHtml.includes('s8 i_t1') && !trHtml.includes('s8 i_ft')) continue;
-
-    // Tüm li'lerin urr attribute'larını topla
-    const liRegex = /urr="([^"]+)"/g;
-    let liMatch;
+    // KRİTİK: Sadece class="s8 i_t1" olan li'lerin urr'larını al
+    // i_an, i_ft gibi diğer li sınıflarını atla
     const urrList = [];
+    const liRegex = /class="s8 i_t1"[^>]*urr="([^"]+)"|urr="([^"]+)"[^>]*class="s8 i_t1"/g;
+    let liMatch;
     while ((liMatch = liRegex.exec(trHtml)) !== null) {
-      urrList.push(liMatch[1]);
+      urrList.push(liMatch[1] || liMatch[2]);
     }
     if (urrList.length === 0) continue;
 
-    // Hedef tarihe uyan urr'u seç
+    // Hedef tarihe uyan urr seç
     let chosenUrr = urrList[0];
     if (targetDate) {
       for (const u of urrList) {
@@ -54,7 +54,7 @@ function parseHtml(html, targetDate, fallbackHotelId) {
     else if (chosenUrr.includes(AKAY_PATTERN)) agency = 'AKAY';
     if (!agency) continue;
 
-    // Fiyat: td.c_pe içindeki a href'inden x= (EUR)
+    // Fiyat: td.c_pe içindeki a href'inden x=
     const cpeTdMatch = trHtml.match(/class="c_pe"[\s\S]*?<\/td>/);
     if (!cpeTdMatch) continue;
     const cpeTd = cpeTdMatch[0];
@@ -62,7 +62,6 @@ function parseHtml(html, targetDate, fallbackHotelId) {
     let price = 0;
     const xMatch = cpeTd.match(/[?&]x=(\d+)/);
     if (xMatch) price = parseInt(xMatch[1], 10);
-
     if (!price) {
       const titleMatch = cpeTd.match(/title="(\d+)\s*EUR"/i);
       if (titleMatch) price = parseInt(titleMatch[1], 10);
@@ -201,17 +200,23 @@ async function sendTelegramSplit(newAlerts, closedAlerts) {
     for (const a of g.entries) {
       if (a.type === 'closed') {
         block += `  📅 ${a.checkIn} ✅ AKAY kapandı\n`;
-      } else if (a.akayPrice < a.peninsulaPrice) {
-        const fark = a.peninsulaPrice - a.akayPrice;
-        block += `  📅 ${a.checkIn} 🚨 AKAY girdi (gerideyiz)\n`;
-        block += `     📌 Peninsula: ${a.peninsulaPrice} EUR\n`;
-        block += `     ⚠️ AKAY: ${a.akayPrice} EUR (Fark: ${fark} EUR)\n`;
-      } else if (a.akayPrice === a.peninsulaPrice) {
-        block += `  📅 ${a.checkIn} 🟡 AKAY girdi (fiyatlar eşit)\n`;
-        block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice} EUR\n`;
+      } else if (a.akayPrice && a.peninsulaPrice) {
+        if (a.akayPrice < a.peninsulaPrice) {
+          const fark = a.peninsulaPrice - a.akayPrice;
+          block += `  📅 ${a.checkIn} 🚨 AKAY girdi (gerideyiz)\n`;
+          block += `     📌 Peninsula: ${a.peninsulaPrice} EUR\n`;
+          block += `     ⚠️ AKAY: ${a.akayPrice} EUR (Fark: ${fark} EUR)\n`;
+        } else if (a.akayPrice === a.peninsulaPrice) {
+          block += `  📅 ${a.checkIn} 🟡 AKAY girdi (fiyatlar eşit)\n`;
+          block += `     📌 Peninsula = AKAY: ${a.peninsulaPrice} EUR\n`;
+        } else {
+          block += `  📅 ${a.checkIn} 🆕 AKAY girdi (öndeyiz)\n`;
+          block += `     📌 Peninsula: ${a.peninsulaPrice} EUR\n`;
+          block += `     ⚠️ AKAY: ${a.akayPrice} EUR\n`;
+        }
       } else {
-        block += `  📅 ${a.checkIn} 🆕 AKAY girdi (öndeyiz)\n`;
-        block += `     📌 Peninsula: ${a.peninsulaPrice} EUR\n`;
+        // Peninsula fiyatı yoksa sadece AKAY fiyatını göster
+        block += `  📅 ${a.checkIn} ⚠️ AKAY girdi\n`;
         block += `     ⚠️ AKAY: ${a.akayPrice} EUR\n`;
       }
     }
@@ -236,6 +241,9 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
 }
 
+// ─── KRİTİK DEĞİŞİKLİK: Peninsula zorunlu değil ────────────────────────────
+// Hotels.json'daki oteller zaten bizim portföyümüz.
+// AKAY görüldüğünde ihlal var — Peninsula olsun ya da olmasın.
 function analyzeOffers(checkIn, offers, prevState, newState) {
   const newAlerts = [], closedAlerts = [];
   const groups = {};
@@ -251,7 +259,7 @@ function analyzeOffers(checkIn, offers, prevState, newState) {
   }
 
   for (const [key, data] of Object.entries(groups)) {
-    if (!data.peninsula) continue;
+    // Peninsula OLSUN YA DA OLMASIN — state'e yaz
     const prev = prevState[key];
 
     if (!data.akay) {
@@ -291,7 +299,7 @@ async function main() {
   console.log(`Otel: ${hotels.length} | Tarihler: ${dates.map(d => d.checkIn).join(', ')}`);
 
   const prevState = loadState();
-  const newState  = { ...prevState };
+  const newState  = {};  // Temiz başla — sadece bu turda görülenleri kaydet
   const allNew = [], allClosed = [];
 
   const browser = await puppeteer.launch({
@@ -342,7 +350,7 @@ async function main() {
   }
 
   saveState(newState);
-  console.log('State kaydedildi.');
+  console.log(`State kaydedildi (${Object.keys(newState).length} kayit).`);
 
   if (allNew.length > 0 || allClosed.length > 0) {
     console.log(`${allNew.length} yeni, ${allClosed.length} kapanan. Bildirim gonderiliyor...`);
