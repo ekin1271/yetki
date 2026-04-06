@@ -1,0 +1,35 @@
+name: Debug Tekel
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - run: npm install
+      - run: |
+          node -e "
+          const puppeteer = require('puppeteer');
+          (async () => {
+            const browser = await puppeteer.launch({headless:'new',args:['--no-sandbox']});
+            const page = await browser.newPage();
+            await page.goto('https://www.bgoperator.ru/price.shtml?action=price&tid=211&idt=&flt2=100510000863&id_price=121110211811&data=11.04.2026&d2=18.04.2026&f7=7&f3=&f8=&ho=0&F4=102625076664&ins=0-40000-EUR&flt=100411293179&p=0120519880.0120519890', {waitUntil:'domcontentloaded',timeout:60000});
+            await page.waitForSelector('div.b-pr',{timeout:30000}).catch(()=>{});
+            await new Promise(r=>setTimeout(r,3000));
+            const html = await page.content();
+            await browser.close();
+            console.log('i_t1 count:', (html.match(/s8 i_t1/g)||[]).length);
+            console.log('i_ft count:', (html.match(/s8 i_ft/g)||[]).length);
+            console.log('103810219 count:', (html.match(/103810219/g)||[]).length);
+            console.log('103816 count:', (html.match(/103816/g)||[]).length);
+            const m = html.match(/class=\"s8 i_t1\"[^>]*/);
+            if(m) console.log('Ornek i_t1:', m[0].substring(0,300));
+            else console.log('i_t1 TAG BULUNAMADI');
+            const m2 = html.match(/<li[^>]*s8 i_t1[^>]*>/);
+            if(m2) console.log('Ornek li tag:', m2[0].substring(0,300));
+          })();
+          "
